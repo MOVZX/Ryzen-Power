@@ -9,6 +9,9 @@
 #define NUM_CPUS 16
 #define BUFFER_SIZE 256
 
+#define BOLD "\033[1m"
+#define RESET "\033[0m"
+
 int64_t get_cpuConsumptionUJoules()
 {
     int64_t consumption = -1;
@@ -233,7 +236,7 @@ int main()
         cpu_freq[i] = read_int_from_file(freq_path) / 1000;
     }
 
-    printf("\nRyzen 7 7800X3D\n\n");
+    printf("\n" BOLD "Ryzen 7 7800X3D" RESET "\n\n");
     printf("Tctl    : %8d°C\n", cpu_tctl);
     printf("Tccd    : %8d°C\n", cpu_tccd);
     printf("Power   : %8.2f W\n", cpu_power);
