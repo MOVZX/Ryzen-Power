@@ -205,6 +205,7 @@ int main()
     int mobo_temp, vrm_temp, pch_temp;
     int radiator_fan, top_fans, bottom1_fans, bottom2_fans;
     int cpu_tctl, cpu_tccd;
+    int mem1_temp, mem2_temp;
     float cpu_power, gpu_edge, gpu_junction, gpu_mem, gpu_power;
     int nvme1_temp, nvme2_temp, nvme3_temp, nvme4_temp;
 
@@ -292,6 +293,14 @@ int main()
         return 1;
     }
 
+    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon8/temp1_input");
+
+    mem1_temp = read_int_from_file(temp_path);
+
+    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon9/temp1_input");
+
+    mem2_temp = read_int_from_file(temp_path);
+
     snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon5/temp1_input");
 
     nvme1_temp = read_int_from_file(temp_path);
@@ -325,6 +334,11 @@ int main()
     printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction : 0.0);
     printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem : 0.0);
     printf("Power    : %.2f W\n", gpu_power);
+    printf("\n");
+
+    printf(BOLD "G-SKILL Trident Z5 Neo" RESET "\n");
+    printf("Mem 1    : %.2f°C\n", mem1_temp >= 0 ? mem1_temp / 1000.0 : 0.0);
+    printf("Mem 2    : %.2f°C\n", mem2_temp >= 0 ? mem2_temp / 1000.0 : 0.0);
     printf("\n");
 
     printf(BOLD "PNY CS3030 2TB" RESET "\n");
