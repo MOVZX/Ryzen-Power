@@ -7,6 +7,7 @@
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
 #define BUFFER_SIZE 256
+#define USEC 1000000
 
 #define BOLD "\033[1m"
 #define RESET "\033[0m"
@@ -46,7 +47,7 @@ int64_t get_currentTimeUSec()
         return -1;
     }
 
-    return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+    return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
 }
 
 float calculate_cpu_power()
@@ -61,7 +62,7 @@ float calculate_cpu_power()
         return -1.0f;
     }
 
-    usleep(1000000);
+    usleep(USEC);
 
     int64_t final_usage = get_cpuConsumptionUJoules();
     int64_t final_time = get_currentTimeUSec();
@@ -97,9 +98,9 @@ float calculate_cpu_power()
         return -1.0f;
     }
 
-    double time_diff_sec = time_diff_usec / 1000000.0;
+    double time_diff_sec = time_diff_usec / USEC;
 
-    return (float)(energy_diff_uj / (time_diff_sec * 1e6));
+    return (float)(energy_diff_uj / (time_diff_sec * USEC));
 }
 
 float read_float_from_command(const char *command)
@@ -267,19 +268,19 @@ int main()
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
 
-        gpu_edge = read_int_from_file(temp_path) / 1000.0;
+        gpu_edge = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
 
-        gpu_junction = read_int_from_file(temp_path) / 1000.0;
+        gpu_junction = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
 
-        gpu_mem = read_int_from_file(temp_path) / 1000.0;
+        gpu_mem = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/power1_average", hwmon_path);
 
-        gpu_power = read_int_from_file(temp_path) / 1000000.0;
+        gpu_power = read_int_from_file(temp_path);
 
         if (gpu_power < 0)
         {
@@ -330,10 +331,10 @@ int main()
     printf("\n");
 
     printf(BOLD "AMD Radeon RX 6800 XT" RESET "\n");
-    printf("Edge     : %.2f°C\n", gpu_edge >= 0 ? gpu_edge : 0.0);
-    printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction : 0.0);
-    printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem : 0.0);
-    printf("Power    : %.2f W\n", gpu_power);
+    printf("Edge     : %.2f°C\n", gpu_edge >= 0 ? gpu_edge / 1000.0 : 0.0);
+    printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction / 1000.0 : 0.0);
+    printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem / 1000.0 : 0.0);
+    printf("Power    : %.2f W\n", gpu_power / 1000000.0);
     printf("\n");
 
     printf(BOLD "G-SKILL Trident Z5 Neo" RESET "\n");
