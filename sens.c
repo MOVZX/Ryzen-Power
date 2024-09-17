@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
+#define BOARD_NAME_PATH "/sys/devices/virtual/dmi/id/board_name"
 #define BUFFER_SIZE 256
 #define USEC 1000000
 
@@ -17,21 +18,14 @@ int64_t get_cpuConsumptionUJoules()
     int64_t consumption = -1;
     FILE *file = fopen(RAPL_FILE_PATH, "r");
 
-    if (file == NULL)
+    if (file && fscanf(file, "%lld", &consumption) == 1)
+        fclose(file);
+    else
     {
-        perror("Error opening RAPL energy file!");
+        perror("Error reading RAPL energy file");
 
-        return -1;
+        if (file) fclose(file);
     }
-
-    if (fscanf(file, "%lld", &consumption) != 1)
-    {
-        perror("Error reading energy consumption!");
-
-        consumption = -1;
-    }
-
-    fclose(file);
 
     return consumption;
 }
@@ -40,14 +34,12 @@ int64_t get_currentTimeUSec()
 {
     struct timeval tv;
 
-    if (gettimeofday(&tv, NULL) != 0)
-    {
-        perror("Error getting current time!");
+    if (gettimeofday(&tv, NULL) == 0)
+        return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
 
-        return -1;
-    }
+    perror("Error getting current time");
 
-    return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
+    return -1;
 }
 
 float calculate_cpu_power()
@@ -57,9 +49,9 @@ float calculate_cpu_power()
 
     if (initial_usage == -1 || initial_time == -1)
     {
-        fprintf(stderr, "Failed to read initial CPU consumption or time data!\n");
+        fprintf(stderr, "Failed to read initial CPU consumption or time data\n");
 
-        return -1.0f;
+        return 0.0f;
     }
 
     usleep(USEC);
@@ -67,69 +59,24 @@ float calculate_cpu_power()
     int64_t final_usage = get_cpuConsumptionUJoules();
     int64_t final_time = get_currentTimeUSec();
 
-    if (final_usage == -1 || final_time == -1)
+    if (final_usage == -1 || final_time == -1 || final_time < initial_time)
     {
-        fprintf(stderr, "Failed to read final CPU consumption or time data!\n");
+        fprintf(stderr, "Failed to read final CPU consumption or time data, or time went backwards\n");
 
-        return -1.0f;
-    }
-
-    if (final_time < initial_time)
-    {
-        fprintf(stderr, "Time went backwards!\n");
-
-        return -1.0f;
+        return 0.0f;
     }
 
     int64_t time_diff_usec = final_time - initial_time;
     int64_t energy_diff_uj = final_usage - initial_usage;
 
-    if (time_diff_usec <= 0)
+    if (time_diff_usec <= 0 || energy_diff_uj < 0)
     {
-        fprintf(stderr, "Invalid time difference!\n");
+        fprintf(stderr, "Invalid time or energy difference\n");
 
-        return -1.0f;
+        return 0.0f;
     }
 
-    if (energy_diff_uj < 0)
-    {
-        fprintf(stderr, "Energy consumption decreased!\n");
-
-        return -1.0f;
-    }
-
-    double time_diff_sec = time_diff_usec / USEC;
-
-    return (float)(energy_diff_uj / (time_diff_sec * USEC));
-}
-
-float read_float_from_command(const char *command)
-{
-    FILE *fp;
-    char output[BUFFER_SIZE];
-    float value = -1.0f;
-
-    fp = popen(command, "r");
-
-    if (fp == NULL)
-    {
-        perror("Error running command!");
-
-        return value;
-    }
-
-    if (fgets(output, sizeof(output), fp) != NULL)
-    {
-        value = strtof(output, NULL);
-    }
-    else
-    {
-        perror("Error reading command output!");
-    }
-
-    pclose(fp);
-
-    return value;
+    return (float)(energy_diff_uj) / (time_diff_usec / (float)USEC);
 }
 
 int read_int_from_file(const char *path)
@@ -137,78 +84,143 @@ int read_int_from_file(const char *path)
     FILE *file = fopen(path, "r");
     int value = -1;
 
-    if (file == NULL)
+    if (file && fscanf(file, "%d", &value) == 1)
+        fclose(file);
+    else
     {
-        perror("Error opening file!");
+        perror("Error reading file");
 
-        return value;
+        if (file) fclose(file);
     }
-
-    if (fscanf(file, "%d", &value) != 1)
-    {
-        perror("Error reading file!");
-
-        value = -1;
-    }
-
-    fclose(file);
 
     return value;
 }
 
-int find_hwmon_path(const char *sensor_name, char *path, size_t size)
+int get_nvme_device_model(const char *nvme_device, char *device_model, size_t size)
 {
-    FILE *fp;
-    char cmd[BUFFER_SIZE];
-    char result[BUFFER_SIZE];
+    char command[BUFFER_SIZE];
 
-    snprintf(cmd, sizeof(cmd), "grep -l '%s' /sys/class/hwmon/hwmon*/name", sensor_name);
+    snprintf(command, sizeof(command), "udevadm info --query=property --name=%sn1 | grep 'ID_MODEL='", nvme_device);
+    FILE *fp = popen(command, "r");
 
-    fp = popen(cmd, "r");
-
-    if (fp == NULL)
+    if (fp)
     {
-        perror("Error running grep command!");
+        char line[BUFFER_SIZE];
 
-        return -1;
+        while (fgets(line, sizeof(line), fp))
+        {
+            if (strstr(line, "ID_MODEL=") != NULL)
+            {
+                char *start = strstr(line, "=");
+
+                if (start)
+                {
+                    start++;
+                    strncpy(device_model, start, size);
+
+                    device_model[strcspn(device_model, "\n")] = 0;
+
+                    pclose(fp);
+
+                    return 0;
+                }
+            }
+        }
+
+        pclose(fp);
     }
 
-    if (fgets(result, sizeof(result), fp) == NULL)
+    return -1;
+}
+
+int find_hwmon_path(const char *sensor_name, char *path, size_t size)
+{
+    char cmd[BUFFER_SIZE];
+
+    snprintf(cmd, sizeof(cmd), "grep -l '%s' /sys/class/hwmon/hwmon*/name", sensor_name);
+    FILE *fp = popen(cmd, "r");
+
+    if (fp && fgets(path, size, fp))
     {
         pclose(fp);
 
-        return -1;
+        path[strcspn(path, "\n")] = 0;
+        size_t len = strlen(path);
+
+        if (len >= 5)
+            path[len - 5] = '\0';
+        else
+            path[0] = '\0';
+
+        return 0;
     }
+    if (fp) pclose(fp);
+    return -1;
+}
 
-    pclose(fp);
+int find_nvme_hwmon_path(const char *nvme_device, char *hwmon_path, size_t max_len)
+{
+    char command[BUFFER_SIZE];
 
-    result[strcspn(result, "\n")] = 0;
+    snprintf(command, sizeof(command), "udevadm info --query=path %s", nvme_device);
+    FILE *fp = popen(command, "r");
 
-    size_t len = strlen(result);
-
-    if (len >= 5)
+    if (fp && fgets(hwmon_path, max_len, fp))
     {
-        snprintf(path, size, "%s", result);
-        path[len - 5] = '\0';
-    }
-    else
-    {
-        path[0] = '\0';
+        pclose(fp);
+
+        hwmon_path[strcspn(hwmon_path, "\n")] = 0;
+
+        snprintf(command, sizeof(command), "find /sys%s -type d -name 'hwmon*'", hwmon_path);
+        fp = popen(command, "r");
+
+        if (fp && fgets(hwmon_path, max_len, fp))
+        {
+            pclose(fp);
+
+            hwmon_path[strcspn(hwmon_path, "\n")] = 0;
+
+            return 0;
+        }
+
+        if (fp) pclose(fp);
     }
 
-    return 0;
+    return -1;
+}
+
+int read_board_name(char *board_name, size_t size)
+{
+    FILE *file = fopen(BOARD_NAME_PATH, "r");
+
+    if (file)
+    {
+        if (fgets(board_name, size, file))
+        {
+            board_name[strcspn(board_name, "\n")] = 0;
+
+            fclose(file);
+
+            return 0;
+        }
+
+        fclose(file);
+    }
+
+    perror("Error reading board name file");
+
+    return -1;
 }
 
 int main()
 {
-    char hwmon_path[BUFFER_SIZE];
-    char temp_path[BUFFER_SIZE];
+    char board_name[BUFFER_SIZE], hwmon_path[BUFFER_SIZE], nvme_device_model[BUFFER_SIZE], temp_path[BUFFER_SIZE];
     int mobo_temp, vrm_temp, pch_temp;
     int radiator_fan, top_fans, bottom1_fans, bottom2_fans;
     int cpu_tctl, cpu_tccd;
-    int mem1_temp, mem2_temp;
-    float cpu_power, gpu_edge, gpu_junction, gpu_mem, gpu_power;
-    int nvme1_temp, nvme2_temp, nvme3_temp, nvme4_temp;
+    float cpu_power = 0.0f, gpu_edge = 0.0f, gpu_junction = 0.0f, gpu_mem = 0.0f, gpu_power = 0.0f;
+    int nvme_temps[4] = {-1, -1, -1, -1};
+    int dram_temps[2] = {-1, -1};
 
     if (find_hwmon_path("nct668*", hwmon_path, sizeof(hwmon_path)) == 0)
     {
@@ -235,7 +247,7 @@ int main()
     }
     else
     {
-        fprintf(stderr, "nct668* sensor module not found! Ensure the sensor module is present or the path is correct!\n");
+        fprintf(stderr, "nct668* sensor module not found!\n");
 
         return 1;
     }
@@ -243,23 +255,16 @@ int main()
     if (find_hwmon_path("k10temp", hwmon_path, sizeof(hwmon_path)) == 0)
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
-
         cpu_tctl = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
-
         cpu_tccd = read_int_from_file(temp_path);
 
         cpu_power = calculate_cpu_power();
-
-        if (cpu_power < 0)
-        {
-            cpu_power = 0;
-        }
     }
     else
     {
-        fprintf(stderr, "k10temp sensor module not found! Ensure the sensor module is present or the path is correct!\n");
+        fprintf(stderr, "k10temp sensor module not found!\n");
 
         return 1;
     }
@@ -267,58 +272,33 @@ int main()
     if (find_hwmon_path("amdgpu", hwmon_path, sizeof(hwmon_path)) == 0)
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
-
         gpu_edge = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
-
         gpu_junction = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
-
         gpu_mem = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/power1_average", hwmon_path);
-
         gpu_power = read_int_from_file(temp_path);
-
-        if (gpu_power < 0)
-        {
-            gpu_power = 0;
-        }
     }
     else
     {
-        fprintf(stderr, "amdgpu sensor module not found! Ensure the sensor module is present or the path is correct!\n");
+        fprintf(stderr, "amdgpu sensor module not found!\n");
 
         return 1;
     }
 
-    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon8/temp1_input");
+    if (read_board_name(board_name, sizeof(board_name)) == 0)
+    {
+        printf("\n" BOLD "%s" RESET "\n", board_name);
+    }
+    else
+    {
+        printf(BOLD "Unknown Motherboard" RESET "\n");
+    }
 
-    mem1_temp = read_int_from_file(temp_path);
-
-    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon9/temp1_input");
-
-    mem2_temp = read_int_from_file(temp_path);
-
-    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon5/temp1_input");
-
-    nvme1_temp = read_int_from_file(temp_path);
-
-    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon3/temp1_input");
-
-    nvme2_temp = read_int_from_file(temp_path);
-
-    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon2/temp1_input");
-
-    nvme3_temp = read_int_from_file(temp_path);
-
-    snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/hwmon4/temp1_input");
-
-    nvme4_temp = read_int_from_file(temp_path);
-
-    printf("\n" BOLD "ASRock B650E Steel Legend" RESET "\n");
     printf("Mobo     : %.2f°C\n", mobo_temp >= 0 ? mobo_temp / 1000.0 : 0.0);
     printf("VRM      : %.2f°C\n", vrm_temp >= 0 ? vrm_temp / 1000.0 : 0.0);
     printf("Chipset  : %.2f°C\n", pch_temp >= 0 ? pch_temp / 1000.0 : 0.0);
@@ -327,36 +307,52 @@ int main()
     printf(BOLD "AMD Ryzen 7 7800X3D" RESET "\n");
     printf("Tctl     : %.2f°C\n", cpu_tctl >= 0 ? cpu_tctl / 1000.0 : 0.0);
     printf("Tccd     : %.2f°C\n", cpu_tccd >= 0 ? cpu_tccd / 1000.0 : 0.0);
-    printf("Power    : %.2f W\n", cpu_power);
+    printf("Power    : %.2f W\n", cpu_power / USEC);
     printf("\n");
 
     printf(BOLD "AMD Radeon RX 6800 XT" RESET "\n");
     printf("Edge     : %.2f°C\n", gpu_edge >= 0 ? gpu_edge / 1000.0 : 0.0);
     printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction / 1000.0 : 0.0);
     printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem / 1000.0 : 0.0);
-    printf("Power    : %.2f W\n", gpu_power / 1000000.0);
+    printf("Power    : %.2f W\n", gpu_power / USEC);
     printf("\n");
 
     printf(BOLD "G-SKILL Trident Z5 Neo" RESET "\n");
-    printf("Mem 1    : %.2f°C\n", mem1_temp >= 0 ? mem1_temp / 1000.0 : 0.0);
-    printf("Mem 2    : %.2f°C\n", mem2_temp >= 0 ? mem2_temp / 1000.0 : 0.0);
+
+    for (int i = 0; i < 2; i++)
+    {
+        snprintf(hwmon_path, sizeof(hwmon_path), "/sys/class/hwmon/hwmon%d", 8 + i);
+
+        snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
+        dram_temps[i] = read_int_from_file(temp_path);
+
+        printf("DRAM %d   : %.2f°C\n", i + 1, dram_temps[i] >= 0 ? dram_temps[i] / 1000.0 : 0.0);
+    }
+
     printf("\n");
 
-    printf(BOLD "PNY CS3030 2TB" RESET "\n");
-    printf("NAND     : %.2f°C\n", nvme1_temp >= 0 ? nvme1_temp / 1000.0 : 0.0);
-    printf("\n");
+    for (int i = 0; i < 4; i++)
+    {
+        char nvme_device[BUFFER_SIZE];
 
-    printf(BOLD "AddLink S70 2TB" RESET "\n");
-    printf("NAND     : %.2f°C\n", nvme2_temp >= 0 ? nvme2_temp / 1000.0 : 0.0);
-    printf("\n");
+        snprintf(nvme_device, sizeof(nvme_device), "/dev/nvme%d", i);
 
-    printf(BOLD "AddLink S70 2TB" RESET "\n");
-    printf("NAND     : %.2f°C\n", nvme3_temp >= 0 ? nvme3_temp / 1000.0 : 0.0);
-    printf("\n");
+        if (find_nvme_hwmon_path(nvme_device, hwmon_path, sizeof(hwmon_path)) == 0)
+        {
+            snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
+            nvme_temps[i] = read_int_from_file(temp_path);
 
-    printf(BOLD "Transcend TS1TMTE220S 1TB" RESET "\n");
-    printf("NAND     : %.2f°C\n", nvme4_temp >= 0 ? nvme4_temp / 1000.0 : 0.0);
-    printf("\n");
+            if (get_nvme_device_model(nvme_device, nvme_device_model, sizeof(nvme_device_model)) == 0)
+                printf(BOLD "%s" RESET "\n", nvme_device_model);
+            else
+                printf(BOLD "NVMe %d: Model name not found" RESET "\n", i + 1);
+
+            printf("NAND     : %.2f°C\n", nvme_temps[i] >= 0 ? nvme_temps[i] / 1000.0 : 0.0);
+            printf("\n");
+        }
+        else
+            printf("Failed to find hwmon path for %s\n", nvme_device);
+    }
 
     printf(BOLD "Lian Li Lancool II" RESET "\n");
     printf("Radiator : %d RPM\n", radiator_fan >= 0 ? radiator_fan : 0);
