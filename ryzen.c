@@ -6,6 +6,8 @@
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
 
+#define USEC 1000000
+
 // Function to get the current energy consumption in microjoules
 int64_t get_cpuConsumptionUJoules()
 {
@@ -43,7 +45,7 @@ int64_t get_currentTimeUSec()
         return -1;
     }
 
-    return ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+    return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
 }
 
 int main()
@@ -59,7 +61,7 @@ int main()
     }
 
     // Short delay to allow measurable change
-    usleep(1000000); // Sleep for 1 second
+    usleep(USEC); // Sleep for 1 second
 
     int64_t final_usage = get_cpuConsumptionUJoules();
     int64_t final_time = get_currentTimeUSec();
@@ -97,10 +99,10 @@ int main()
     }
 
     // Convert time difference to seconds
-    double time_diff_sec = time_diff_usec / 1000000.0;
+    double time_diff_sec = time_diff_usec / USEC;
 
     // Calculate power in watts
-    double watts = energy_diff_uj / (time_diff_sec * 1e6);
+    double watts = energy_diff_uj / (time_diff_sec * USEC);
 
     // Print the result
     printf("%.2lf\n", watts);
