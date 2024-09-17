@@ -230,7 +230,7 @@ int main()
         snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
         vrm_temp = read_int_from_file(temp_path);
 
-        snprintf(temp_path, sizeof(temp_path), "%s/temp5_input", hwmon_path);
+        snprintf(temp_path, sizeof(temp_path), "%s/temp4_input", hwmon_path);
         pch_temp = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/fan1_input", hwmon_path);
