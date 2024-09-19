@@ -6,15 +6,15 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <stdint.h>
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
 #define MAX_PROCESSES 100
 #define MAX_NAME_LENGTH 256
 #define USEC 1000000
 #define KILO 1000
+#define TO_GB (1024.0 * 1024.0)
 
-float get_memory_usage()
+int64_t get_memory_usage()
 {
     FILE *file = fopen("/proc/meminfo", "r");
 
@@ -22,20 +22,40 @@ float get_memory_usage()
     {
         perror("fopen");
 
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
-    long total_memory = 0;
-    long free_memory = 0;
+    char buffer[MAX_NAME_LENGTH];
+    int64_t total_memory = 0;
+    int64_t available_memory = 0;
 
-    fscanf(file, "MemTotal: %ld kB\n", &total_memory);
-    fscanf(file, "MemFree: %ld kB\n", &free_memory);
+    size_t bytes_read = fread(buffer, 1, sizeof(buffer) - 1, file);
+    buffer[bytes_read] = '\0';
 
     fclose(file);
 
-    long used_memory = total_memory - free_memory;
-    // *used_memory_percent = ((float)used_memory / total_memory) * 100.0f; -- persen
-    return (float)used_memory / USEC;
+    char *line = strtok(buffer, "\n");
+
+    while (line != NULL)
+    {
+        if (sscanf(line, "MemTotal: %ld kB", &total_memory) == 1)
+        {
+            // Read total memory
+        }
+        else if (sscanf(line, "MemAvailable: %ld kB", &available_memory) == 1)
+        {
+            break;
+        }
+
+        line = strtok(NULL, "\n");
+    }
+
+    if (total_memory == 0 || available_memory == 0)
+        return -1;
+
+    int64_t used_memory_gb = (total_memory - available_memory) / TO_GB;
+
+    return used_memory_gb;
 }
 
 int64_t get_cpuConsumptionUJoules()
@@ -80,7 +100,7 @@ float calculate_cpu_power()
     if (initial_usage == -1 || initial_time == -1)
         return -1.0f;
 
-    usleep(USEC);
+    sleep(1);
 
     int64_t final_usage = get_cpuConsumptionUJoules();
     int64_t final_time = get_currentTimeUSec();
@@ -188,7 +208,7 @@ void print_cpu_info()
     float used_memory_gb = get_memory_usage();
 
     if (cpu_temperature1 && cpu_temperature2 && used_memory_gb)
-        printf("   %.0f GB |    %.0f °C |    %.0f °C | 󰚥 %.0f W\n", used_memory_gb, atof(cpu_temperature1), atof(cpu_temperature2), cpu_power);
+        printf("   %.1f GB |    %.0f °C |    %.0f °C | 󰚥 %.0f W\n", used_memory_gb, atof(cpu_temperature1), atof(cpu_temperature2), cpu_power);
 
     free(cpu_temperature1);
     free(cpu_temperature2);
