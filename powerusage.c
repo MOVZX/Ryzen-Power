@@ -249,12 +249,17 @@ void print_amd_gpu_info()
 void print_nvidia_gpu_info()
 {
     char* gpu_usage = execute_command("nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits");
+    char* gpu_vram = execute_command("nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits");
     char* gpu_temperature1 = execute_command("nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits");
     char* gpu_power = execute_command("nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits");
 
-    if (gpu_temperature1 && gpu_usage && gpu_power)
-        printf("   %.0f %% |    %.0f °C | 󰚥 %.0f W\n",
-               atof(gpu_usage), atof(gpu_temperature1), atof(gpu_power));
+    if (gpu_temperature1 && gpu_usage && gpu_power && gpu_vram)
+    {
+        float vram_gb = atof(gpu_vram) / 1024.0;
+
+        printf("   %.0f %% |    %.1f GB |    %.0f °C | 󰚥 %.0f W\n",
+               atof(gpu_usage), vram_gb, atof(gpu_temperature1), atof(gpu_power));
+    }
 
     free(gpu_usage);
     free(gpu_temperature1);
