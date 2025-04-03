@@ -55,6 +55,13 @@ static int nvidia_fd            = -1;
 static void *nvidia_map_base    = MAP_FAILED;
 static int gpu_type             = 0;
 
+/**
+ * Mendapatkan penggunaan CPU dalam satuan persentase.
+ *
+ * Nilai balik:
+ *   -1.0f jika gagal membaca penggunaan CPU,
+ *   float lainnya adalah persentase CPU yang digunakan.
+ */
 float get_cpu_usage(void)
 {
     char *cpu_usage = execute_command("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'");
@@ -69,6 +76,20 @@ float get_cpu_usage(void)
     return usage;
 }
 
+/**
+ * Mendapatkan penggunaan memori dalam satuan gigabyte (GB).
+ *
+ * Parameter:
+ * Tidak ada parameter yang diperlukan.
+ *
+ * Nilai Kembali:
+ * - Jika berhasil, fungsi mengembalikan penggunaan memori dalam satuan gigabyte (GB).
+ * - Jika terjadi kegagalan (misalnya, tidak dapat membuka file "/proc/meminfo"), fungsi mengembalikan nilai -1.
+ *
+ * Catatan:
+ * - Fungsi ini bergantung pada file "/proc/meminfo". Pastikan file ini tersedia di sistem.
+ * - Fungsi ini menggunakan alokasi memori dinamis untuk menyimpan hasil membaca file "/proc/meminfo". Pastikan memori dibebaskan dengan benar untuk menghindari kebocoran memori.
+ */
 int64_t get_memory_usage(void)
 {
     FILE *file = fopen("/proc/meminfo", "r");
@@ -109,6 +130,20 @@ int64_t get_memory_usage(void)
     return (total_memory - available_memory) / TO_GB;
 }
 
+/**
+ * Mendapatkan konsumsi energi/daya CPU saat ini dalam satuan mikrojoule.
+ *
+ * Parameter:
+ * Tidak ada parameter yang diperlukan.
+ *
+ * Nilai Kembali:
+ * - Jika berhasil, fungsi mengembalikan konsumsi energi/daya CPU dalam satuan mikrojoule.
+ * - Jika terjadi kegagalan (misalnya, file RAPL_FILE_PATH tidak dapat dibuka), fungsi mengembalikan nilai -1.
+ *
+ * Catatan:
+ * - Fungsi ini bergantung pada file RAPL_FILE_PATH. Pastikan file ini tersedia di sistem (biasanya tersedia di distribusi Linux standar).
+ * - RAPL_FILE_PATH harus didefinisikan sebelumnya dalam kode untuk menentukan path file konsumsi energi/daya CPU.
+ */
 int64_t get_cpuConsumptionUJoules(void)
 {
     int64_t consumption;
@@ -129,6 +164,21 @@ int64_t get_cpuConsumptionUJoules(void)
     return consumption;
 }
 
+/**
+ * Mengembalikan waktu saat ini dalam satuan mikrodetik.
+ *
+ * Parameter:
+ * Tidak ada parameter yang diperlukan.
+ *
+ * Nilai Kembali:
+ * - Jika berhasil, fungsi mengembalikan waktu saat ini dalam satuan mikrodetik.
+ * - Jika terjadi kegagalan (misalnya, fungsi gettimeofday gagal), fungsi mengembalikan nilai -1.
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan gettimeofday untuk mendapatkan waktu saat ini, dan mengembalikan waktu
+ *   dalam bentuk integer 64-bit yang mewakili jumlah mikrodetik sejak epoch.
+ */
+
 int64_t get_currentTimeUSec(void)
 {
     struct timeval tv;
@@ -143,6 +193,19 @@ int64_t get_currentTimeUSec(void)
     return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
 }
 
+/**
+ * Menghitung daya listrik CPU dalam satuan Watt.
+ *
+ * Fungsi ini menghitung daya listrik CPU dengan cara mengukur perubahan energi listrik
+ * yang dikonsumsi oleh CPU dalam satu detik. Jika terjadi kegagalan dalam pengukuran,
+ * fungsi ini mengembalikan nilai -1.0f.
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan fungsi gettimeofday dan get_cpuConsumptionUJoules untuk
+ *   mengukur waktu dan energi listrik yang dikonsumsi oleh CPU.
+ * - Fungsi ini mengembalikan nilai daya listrik CPU dalam satuan Watt, dihitung
+ *   berdasarkan perubahan energi listrik yang dikonsumsi oleh CPU dalam satu detik.
+ */
 float calculate_cpu_power(void)
 {
     int64_t initial_usage = get_cpuConsumptionUJoules();
@@ -162,6 +225,22 @@ float calculate_cpu_power(void)
     return (float)((final_usage - initial_usage) / ((final_time - initial_time) / USEC * USEC));
 }
 
+/**
+ * Menjalankan perintah shell dan mengembalikan output perintah dalam bentuk string.
+ *
+ * Parameter:
+ * - command: perintah shell yang ingin dijalankan.
+ *
+ * Nilai Kembali:
+ * - Jika perintah berhasil dijalankan dan mengembalikan output, fungsi mengembalikan string yang berisi output perintah.
+ * - Jika perintah gagal dijalankan atau tidak mengembalikan output, fungsi mengembalikan nilai NULL.
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan popen dan fgets untuk menjalankan perintah shell dan
+ *   membaca outputnya.
+ * - Fungsi ini mengembalikan output perintah dalam bentuk string, yang diakhiri
+ *   dengan karakter null (\0).
+ */
 char *execute_command(const char *command)
 {
     FILE *fp = popen(command, "r");
@@ -190,6 +269,24 @@ char *execute_command(const char *command)
     return output;
 }
 
+/**
+ * Mengecek apakah proses dengan nama tertentu sedang berjalan atau tidak.
+ *
+ * Fungsi ini menggunakan direktori /proc untuk mengecek apakah proses dengan nama
+ * tertentu sedang berjalan atau tidak.
+ *
+ * Parameter:
+ * - process_name: nama proses yang ingin di cek.
+ *
+ * Nilai Kembali:
+ * - Jika proses sedang berjalan, fungsi mengembalikan nilai true.
+ * - Jika proses tidak sedang berjalan, fungsi mengembalikan nilai false.
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan opendir dan readdir untuk mengecek isi direktori /proc.
+ * - Fungsi ini menggunakan fopen dan fgets untuk membaca isi file /proc/<pid>/comm.
+ * - Fungsi ini menggunakan sscanf untuk memparsing isi file /proc/<pid>/comm.
+ */
 bool is_process_running_native(const char *process_name)
 {
     DIR *dir = opendir("/proc");
@@ -226,6 +323,14 @@ bool is_process_running_native(const char *process_name)
     return false;
 }
 
+/**
+ * Fungsi ini digunakan untuk membaca nama proses yang ada dalam config_file dan
+ * menyimpannya dalam array process_list.
+ *
+ * @param config_file path ke file yang berisi nama proses yang akan dihitung
+ * @param process_list array yang akan diisi dengan nama proses yang dihitung
+ * @return jumlah proses yang dihitung
+ */
 int load_process_names(const char *config_file, char process_list[MAX_PROCESSES][MAX_NAME_LENGTH])
 {
     FILE *fp = fopen(config_file, "r");
@@ -247,6 +352,14 @@ int load_process_names(const char *config_file, char process_list[MAX_PROCESSES]
     return count;
 }
 
+/**
+ * Fungsi ini digunakan untuk memeriksa apakah ada proses yang masih berjalan dari
+ * proses-proses yang dihitung.
+ *
+ * @param process_list array yang berisi nama-nama proses yang dihitung
+ * @param process_count jumlah proses yang dihitung
+ * @return true jika ada proses yang berjalan, false jika tidak ada
+ */
 bool is_any_process_running(char process_list[MAX_PROCESSES][MAX_NAME_LENGTH], int process_count)
 {
     for (int i = 0; i < process_count; i++)
@@ -256,6 +369,22 @@ bool is_any_process_running(char process_list[MAX_PROCESSES][MAX_NAME_LENGTH], i
     return false;
 }
 
+/**
+ * Mencetak informasi CPU seperti penggunaan CPU, penggunaan memori, suhu CPU,
+ * dan konsumsi daya CPU.
+ *
+ * Informasi CPU dicetak dalam format:
+ *    <cpu_usage>% | <memory_usage> GB | <cpu_temperature1> °C | <cpu_temperature2> °C | <cpu_power> W
+ *
+ * Nilai balik:
+ *   void
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan perintah "sensors" dan "awk" untuk membaca suhu CPU.
+ * - Fungsi ini menggunakan fungsi "get_cpu_usage", "calculate_cpu_power", dan
+ *   "get_memory_usage" untuk menghitung penggunaan CPU, konsumsi daya CPU, dan
+ *   penggunaan memori.
+ */
 void print_cpu_info(void)
 {
     char *cpu_temperature1 = execute_command("sensors k10temp-pci-* | awk -F '[:°C]' '/Tctl:/ {print $2}'");
@@ -271,6 +400,18 @@ void print_cpu_info(void)
     free(cpu_temperature2);
 }
 
+/**
+ * Mencetak informasi GPU seperti penggunaan GPU, suhu GPU, dan konsumsi daya GPU.
+ *
+ * Informasi GPU dicetak dalam format:
+ *    <gpu_usage>% | <gpu_temperature1> °C | <gpu_temperature2> °C | <gpu_temperature3> °C | <gpu_power> W
+ *
+ * Nilai balik:
+ *   void
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan perintah "rocm-smi" untuk membaca informasi GPU.
+ */
 void print_amd_gpu_info(void)
 {
     char *gpu_usage = execute_command("rocm-smi -d 0 --showuse | awk '/GPU use \\(%\\)/ {print $NF}'");
@@ -290,6 +431,19 @@ void print_amd_gpu_info(void)
     free(gpu_power);
 }
 
+/**
+ * Mencetak informasi GPU seperti penggunaan GPU, suhu GPU, dan konsumsi daya GPU.
+ *
+ * Informasi GPU dicetak dalam format:
+ *    <gpu_usage>% | <gpu_temperature1> °C | <gpu_temperature2> °C | <gpu_temperature3> °C | <gpu_power> W
+ *
+ * Nilai balik:
+ *   void
+ *
+ * Catatan:
+ * - Fungsi ini menggunakan perintah "nvidia-smi" untuk membaca informasi GPU.
+ * - Fungsi ini hanya mendukung NVIDIA GPU.
+ */
 void print_nvidia_gpu_info(void)
 {
     if (nvmlInit() != NVML_SUCCESS)
@@ -409,6 +563,17 @@ void print_nvidia_gpu_info(void)
     nvmlShutdown();
 }
 
+/**
+ * Mendeteksi tipe GPU yang terpasang.
+ *
+ * Fungsi ini akan mencoba mendeteksi tipe GPU yang terpasang dengan
+ * menjalankan perintah "rocm-smi" untuk AMD dan "nvidia-smi" untuk NVIDIA.
+ *
+ * Nilai balik:
+ *   0 jika tidak ada GPU yang kompatibel,
+ *   1 jika GPU AMD,
+ *   2 jika GPU NVIDIA.
+ */
 int detect_gpu_type(void)
 {
     if (gpu_type)
@@ -439,6 +604,16 @@ int detect_gpu_type(void)
     return 0;
 }
 
+/**
+ * @brief Program utama powerusage.
+ *
+ * Program ini akan menghitung penggunaan daya CPU dan GPU.
+ *
+ * @param argc Jumlah argument yang diberikan.
+ * @param argv Array argument yang diberikan.
+ *
+ * @return 0 jika berhasil, 1 jika tidak.
+ */
 int main(int argc, char *argv[])
 {
     if (argc < 3)
