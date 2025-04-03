@@ -212,6 +212,26 @@ int read_board_name(char *board_name, size_t size)
     return -1;
 }
 
+void read_nvidia_gpu_info(float *temperature, float *power) {
+    char command[BUFFER_SIZE] = "nvidia-smi --query-gpu=temperature.gpu,power.draw --format=csv,noheader";
+    FILE *fp = popen(command, "r");
+
+    if (fp)
+    {
+        char line[BUFFER_SIZE];
+
+        if (fgets(line, sizeof(line), fp))
+            sscanf(line, "%f, %f", temperature, power);
+
+        pclose(fp);
+    }
+    else
+    {
+        *temperature = -1;
+        *power = -1;
+    }
+}
+
 int main()
 {
     char board_name[BUFFER_SIZE], hwmon_path[BUFFER_SIZE], nvme_device_model[BUFFER_SIZE], temp_path[BUFFER_SIZE];
@@ -221,6 +241,8 @@ int main()
     float cpu_power = 0.0f, gpu_edge = 0.0f, gpu_junction = 0.0f, gpu_mem = 0.0f, gpu_power = 0.0f;
     int nvme_temps[4] = {-1, -1, -1, -1};
     int dram_temps[2] = {-1, -1};
+    int amdgpu_exist = 0;
+    float gpu_temp_nvidia = -1.0f, gpu_power_nvidia = -1.0f;
 
     if (find_hwmon_path("nct668*", hwmon_path, sizeof(hwmon_path)) == 0)
     {
@@ -236,13 +258,13 @@ int main()
         snprintf(temp_path, sizeof(temp_path), "%s/fan1_input", hwmon_path);
         radiator_fan = read_int_from_file(temp_path);
 
-        snprintf(temp_path, sizeof(temp_path), "%s/fan4_input", hwmon_path);
+        snprintf(temp_path, sizeof(temp_path), "%s/fan3_input", hwmon_path);
         top_fans = read_int_from_file(temp_path);
 
-        snprintf(temp_path, sizeof(temp_path), "%s/fan5_input", hwmon_path);
+        snprintf(temp_path, sizeof(temp_path), "%s/fan4_input", hwmon_path);
         bottom1_fans = read_int_from_file(temp_path);
 
-        snprintf(temp_path, sizeof(temp_path), "%s/fan6_input", hwmon_path);
+        snprintf(temp_path, sizeof(temp_path), "%s/fan5_input", hwmon_path);
         bottom2_fans = read_int_from_file(temp_path);
     }
     else
@@ -282,13 +304,11 @@ int main()
 
         snprintf(temp_path, sizeof(temp_path), "%s/power1_average", hwmon_path);
         gpu_power = read_int_from_file(temp_path);
-    }
-    else
-    {
-        fprintf(stderr, "amdgpu sensor module not found!\n");
 
-        return 1;
+        amdgpu_exist = 1;
     }
+
+    read_nvidia_gpu_info(&gpu_temp_nvidia, &gpu_power_nvidia);
 
     if (read_board_name(board_name, sizeof(board_name)) == 0)
     {
@@ -310,12 +330,23 @@ int main()
     printf("Power    : %.2f W\n", cpu_power / USEC);
     printf("\n");
 
-    printf(BOLD "AMD Radeon RX 6800 XT" RESET "\n");
-    printf("Edge     : %.2f°C\n", gpu_edge >= 0 ? gpu_edge / 1000.0 : 0.0);
-    printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction / 1000.0 : 0.0);
-    printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem / 1000.0 : 0.0);
-    printf("Power    : %.2f W\n", gpu_power / USEC);
-    printf("\n");
+    if (amdgpu_exist)
+    {
+        printf(BOLD "AMD Radeon RX 6800 XT" RESET "\n");
+        printf("Edge     : %.2f°C\n", gpu_edge >= 0 ? gpu_edge / 1000.0 : 0.0);
+        printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction / 1000.0 : 0.0);
+        printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem / 1000.0 : 0.0);
+        printf("Power    : %.2f W\n", gpu_power / USEC);
+        printf("\n");
+    }
+
+    if (gpu_temp_nvidia > 0 && gpu_power_nvidia > 0)
+    {
+        printf(BOLD "NVIDIA RTX 3090" RESET "\n");
+        printf("Temp     : %.1f°C\n", gpu_temp_nvidia);
+        printf("Power    : %.1f W\n", gpu_power_nvidia);
+        printf("\n");
+    }
 
     printf(BOLD "G-SKILL Trident Z5 Neo" RESET "\n");
 
