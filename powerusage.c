@@ -15,7 +15,6 @@
 #include <nvml.h>
 
 #define RAPL_FILE_PATH          "/sys/class/powercap/intel-rapl:0/energy_uj"
-#define MAX_PROCESSES           100
 #define MAX_NAME_LENGTH         300
 #define USEC                    1000000
 #define KILO                    1000
@@ -32,9 +31,6 @@ int64_t get_cpuConsumptionUJoules(void);
 int64_t get_currentTimeUSec(void);
 float calculate_cpu_power(void);
 char *execute_command(const char *command);
-bool is_process_running_native(const char *process_name);
-int load_process_names(const char *config_file, char process_list[MAX_PROCESSES][MAX_NAME_LENGTH]);
-bool is_any_process_running(char process_list[MAX_PROCESSES][MAX_NAME_LENGTH], int process_count);
 void print_cpu_info(void);
 void print_amd_gpu_info(void);
 void print_nvidia_gpu_info(void);
@@ -270,106 +266,6 @@ char *execute_command(const char *command)
 }
 
 /**
- * Mengecek apakah proses dengan nama tertentu sedang berjalan atau tidak.
- *
- * Fungsi ini menggunakan direktori /proc untuk mengecek apakah proses dengan nama
- * tertentu sedang berjalan atau tidak.
- *
- * Parameter:
- * - process_name: nama proses yang ingin di cek.
- *
- * Nilai Kembali:
- * - Jika proses sedang berjalan, fungsi mengembalikan nilai true.
- * - Jika proses tidak sedang berjalan, fungsi mengembalikan nilai false.
- *
- * Catatan:
- * - Fungsi ini menggunakan opendir dan readdir untuk mengecek isi direktori /proc.
- * - Fungsi ini menggunakan fopen dan fgets untuk membaca isi file /proc/<pid>/comm.
- * - Fungsi ini menggunakan sscanf untuk memparsing isi file /proc/<pid>/comm.
- */
-bool is_process_running_native(const char *process_name)
-{
-    DIR *dir = opendir("/proc");
-
-    if (!dir)
-        return false;
-
-    struct dirent *entry;
-    char path[MAX_NAME_LENGTH], pname[MAX_NAME_LENGTH], buffer[MAX_NAME_LENGTH];
-
-    while ((entry = readdir(dir)))
-    {
-        if (isdigit(entry->d_name[0]))
-        {
-            snprintf(path, sizeof(path), "/proc/%s/comm", entry->d_name);
-
-            FILE *fp = fopen(path, "r");
-
-            if (fp && fgets(buffer, sizeof(buffer), fp) && sscanf(buffer, "%s", pname) && !strcmp(pname, process_name))
-            {
-                fclose(fp);
-                closedir(dir);
-
-                return true;
-            }
-
-            if (fp)
-                fclose(fp);
-        }
-    }
-
-    closedir(dir);
-
-    return false;
-}
-
-/**
- * Fungsi ini digunakan untuk membaca nama proses yang ada dalam config_file dan
- * menyimpannya dalam array process_list.
- *
- * @param config_file path ke file yang berisi nama proses yang akan dihitung
- * @param process_list array yang akan diisi dengan nama proses yang dihitung
- * @return jumlah proses yang dihitung
- */
-int load_process_names(const char *config_file, char process_list[MAX_PROCESSES][MAX_NAME_LENGTH])
-{
-    FILE *fp = fopen(config_file, "r");
-
-    if (!fp)
-        return -1;
-
-    char line[MAX_NAME_LENGTH];
-    int count = 0;
-
-    while (fgets(line, sizeof(line), fp) && count < MAX_PROCESSES)
-    {
-        strtok(line, "\n");
-        strncpy(process_list[count++], line, MAX_NAME_LENGTH);
-    }
-
-    fclose(fp);
-
-    return count;
-}
-
-/**
- * Fungsi ini digunakan untuk memeriksa apakah ada proses yang masih berjalan dari
- * proses-proses yang dihitung.
- *
- * @param process_list array yang berisi nama-nama proses yang dihitung
- * @param process_count jumlah proses yang dihitung
- * @return true jika ada proses yang berjalan, false jika tidak ada
- */
-bool is_any_process_running(char process_list[MAX_PROCESSES][MAX_NAME_LENGTH], int process_count)
-{
-    for (int i = 0; i < process_count; i++)
-        if (is_process_running_native(process_list[i]))
-            return true;
-
-    return false;
-}
-
-/**
  * Mencetak informasi CPU seperti penggunaan CPU, penggunaan memori, suhu CPU,
  * dan konsumsi daya CPU.
  *
@@ -388,16 +284,20 @@ bool is_any_process_running(char process_list[MAX_PROCESSES][MAX_NAME_LENGTH], i
 void print_cpu_info(void)
 {
     char *cpu_temperature1 = execute_command("sensors k10temp-pci-* | awk -F '[:°C]' '/Tctl:/ {print $2}'");
-    char *cpu_temperature2 = execute_command("sensors k10temp-pci-* | awk -F '[:°C]' '/Tccd1:/ {print $2}'");
+    // char *cpu_temperature2 = execute_command("sensors k10temp-pci-* | awk -F '[:°C]' '/Tccd1:/ {print $2}'");
+    char *dram_temperature1 = execute_command("sensors spd5118-i2c-2-* | awk '/temp1:/ {print $2}' | tr -d '+°C' | awk 'NR==1'");
+    char *dram_temperature2 = execute_command("sensors spd5118-i2c-2-* | awk '/temp1:/ {print $2}' | tr -d '+°C' | awk 'NR==2'");
     float cpu_usage = get_cpu_usage();
     float cpu_power = calculate_cpu_power();
     float used_memory_gb = get_memory_usage();
 
-    if (cpu_temperature1 && cpu_temperature2 && used_memory_gb >= 0 && cpu_usage >= 0)
-        printf("󰻠   %.0f %% |    %.1f GB |    %.0f °C |    %.0f °C | 󰚥 %.0f W\n",
-               cpu_usage, used_memory_gb, atof(cpu_temperature1), atof(cpu_temperature2), cpu_power);
+    if (cpu_temperature1 && dram_temperature1 && dram_temperature2 && used_memory_gb >= 0 && cpu_usage >= 0)
+        printf("󰻠   %.0f %% |    %.1f GB |    %.0f °C |    %.0f °C |    %.0f °C | 󰚥 %.0f W\n",
+               cpu_usage, used_memory_gb, atof(cpu_temperature1), atof(dram_temperature1), atof(dram_temperature2), cpu_power);
+
     free(cpu_temperature1);
-    free(cpu_temperature2);
+    free(dram_temperature1);
+    free(dram_temperature2);
 }
 
 /**
@@ -616,24 +516,18 @@ int detect_gpu_type(void)
  */
 int main(int argc, char *argv[])
 {
-    if (argc < 3)
+    if (argc < 2)
     {
-        fprintf(stderr, "Sintaks: powerusage CONFIG CPU_GPU, Contoh: powerusage ~/.config/daftar_hitam.conf cpu\n");
+        fprintf(stderr, "Sintaks: powerusage CONFIG CPU_GPU, Contoh: powerusage cpu\n");
 
         return 1;
     }
 
-    char process_list[MAX_PROCESSES][MAX_NAME_LENGTH];
-    int process_count = load_process_names(argv[1], process_list);
-
-    if (process_count == -1 || is_any_process_running(process_list, process_count))
-        return 1;
-
-    if (!strcmp(argv[2], "cpu"))
+    if (!strcmp(argv[1], "cpu"))
     {
         print_cpu_info();
     }
-    else if (!strcmp(argv[2], "gpu"))
+    else if (!strcmp(argv[1], "gpu"))
     {
         gpu_type = detect_gpu_type();
 

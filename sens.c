@@ -312,7 +312,7 @@ int main()
 
     if (read_board_name(board_name, sizeof(board_name)) == 0)
     {
-        printf("\n" BOLD "%s" RESET "\n", board_name);
+        printf(BOLD "%s" RESET "\n", board_name);
     }
     else
     {
@@ -352,7 +352,7 @@ int main()
 
     for (int i = 0; i < 2; i++)
     {
-        snprintf(hwmon_path, sizeof(hwmon_path), "/sys/class/hwmon/hwmon%d", 8 + i);
+        snprintf(hwmon_path, sizeof(hwmon_path), "/sys/class/hwmon/hwmon%d", 5 + i);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
         dram_temps[i] = read_int_from_file(temp_path);

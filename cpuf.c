@@ -236,7 +236,7 @@ int main()
         cpu_freq[i] = read_int_from_file(freq_path) / 1000;
     }
 
-    printf("\n" BOLD "Ryzen 7 7800X3D" RESET "\n\n");
+    printf(BOLD "Ryzen 7 7800X3D" RESET "\n\n");
     printf("Tctl    : %8d°C\n", cpu_tctl);
     printf("Tccd    : %8d°C\n", cpu_tccd);
     printf("Power   : %8.2f W\n", cpu_power);
