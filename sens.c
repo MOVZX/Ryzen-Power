@@ -1,53 +1,156 @@
+/*
+ * sens - Utilitas untuk memantau sensor perangkat keras.
+ *
+ * Hak Cipta (C) 2024 MOVZX
+ *
+ * Program ini adalah perangkat lunak bebas; Anda dapat menyebarluaskannya kembali
+ * dan/atau memodifikasinya di bawah ketentuan Lisensi Publik Umum GNU
+ * sebagaimana dipublikasikan oleh Free Software Foundation; baik versi 2
+ * dari Lisensi, atau (sesuai pilihan Anda) versi yang lebih baru.
+ *
+ * Program ini didistribusikan dengan harapan akan bermanfaat,
+ * tetapi TANPA JAMINAN APAPUN; bahkan tanpa jaminan tersirat
+ * DAGANGAN atau KESESUAIAN UNTUK TUJUAN TERTENTU. Lihat
+ * Lisensi Publik Umum GNU untuk lebih jelasnya.
+ *
+ * Anda seharusnya telah menerima salinan Lisensi Publik Umum GNU
+ * bersama dengan program ini; jika tidak, tulislah ke Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+#define _GNU_SOURCE
+
 #include <stdio.h>
+#include <libgen.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <glob.h>
+#include <limits.h>
+#include <unistd.h>
+#include <dirent.h>
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
-#define BOARD_NAME_PATH "/sys/devices/virtual/dmi/id/board_name"
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE 32
 #define USEC 1000000
+#define KILO 1000
 
 #define BOLD "\033[1m"
 #define RESET "\033[0m"
 
-int64_t get_cpuConsumptionUJoules()
+enum GpuType
 {
-    int64_t consumption = -1;
-    FILE *file = fopen(RAPL_FILE_PATH, "r");
+    GPU_TYPE_UNINITIALIZED = -1,
+    GPU_TYPE_NONE = 0,
+    GPU_TYPE_AMD,
+    GPU_TYPE_NVIDIA,
+};
 
-    if (file && fscanf(file, "%lld", &consumption) == 1)
-        fclose(file);
+/**
+ * @brief Menjalankan perintah shell dan mengembalikan outputnya.
+ *
+ * @param command Perintah shell yang akan dieksekusi.
+ * @return char* Baris pertama dari output perintah, atau NULL jika gagal.
+ *
+ * @note Memori yang dikembalikan harus dibebaskan oleh pemanggil.
+ *       Fungsi ini merupakan bottleneck kinerja karena forking proses.
+ */
+char *execute_command(const char *command)
+{
+    FILE *fp = popen(command, "r");
+
+    if (!fp)
+    {
+        perror("popen");
+
+        return NULL;
+    }
+
+    char *output = malloc(4096);
+
+    if (!output)
+    {
+        pclose(fp);
+
+        return NULL;
+    }
+
+    if (fgets(output, 4096, fp) == NULL)
+    {
+        free(output);
+
+        output = NULL;
+    }
     else
     {
-        perror("Error reading RAPL energy file");
-
-        if (file) fclose(file);
+        output[strcspn(output, "\n")] = 0;
     }
+
+    pclose(fp);
+
+    return output;
+}
+
+/**
+ * @brief Mendapatkan konsumsi energi CPU saat ini dalam mikrojoule.
+ *
+ * @return int64_t Konsumsi energi dalam mikrojoule, atau -1 jika gagal.
+ *
+ * @note Membutuhkan antarmuka RAPL di RAPL_FILE_PATH.
+ */
+int64_t get_cpuConsumptionUJoules()
+{
+    int64_t consumption;
+    FILE *file = fopen(RAPL_FILE_PATH, "r");
+
+    if (!file || fscanf(file, "%ld", &consumption) != 1)
+    {
+        perror("Failed to read CPU energy consumption");
+
+        if (file)
+            fclose(file);
+
+        return -1;
+    }
+
+    fclose(file);
 
     return consumption;
 }
 
+/**
+ * @brief Mengembalikan waktu saat ini dalam mikrodetik.
+ *
+ * @return int64_t Waktu saat ini dalam mikrodetik, atau -1 jika gagal.
+ */
 int64_t get_currentTimeUSec()
 {
     struct timeval tv;
 
-    if (gettimeofday(&tv, NULL) == 0)
-        return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
+    if (gettimeofday(&tv, NULL) != 0)
+    {
+        perror("Failed to get current time");
 
-    perror("Error getting current time");
+        return -1;
+    }
 
-    return -1;
+    return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
 }
 
+/**
+ * @brief Menghitung daya CPU rata-rata dalam Watt selama interval 1 detik.
+ *
+ * @return float Daya CPU dalam Watt, atau 0.0f jika gagal.
+ */
 float calculate_cpu_power()
 {
-    int64_t initial_usage = get_cpuConsumptionUJoules();
-    int64_t initial_time = get_currentTimeUSec();
+    int64_t initial_energy_uj = get_cpuConsumptionUJoules();
+    int64_t initial_time_us = get_currentTimeUSec();
 
-    if (initial_usage == -1 || initial_time == -1)
+    if (initial_energy_uj == -1 || initial_time_us == -1)
     {
         fprintf(stderr, "Failed to read initial CPU consumption or time data\n");
 
@@ -56,163 +159,160 @@ float calculate_cpu_power()
 
     usleep(USEC);
 
-    int64_t final_usage = get_cpuConsumptionUJoules();
-    int64_t final_time = get_currentTimeUSec();
+    int64_t final_energy_uj = get_cpuConsumptionUJoules();
+    int64_t final_time_us = get_currentTimeUSec();
 
-    if (final_usage == -1 || final_time == -1 || final_time < initial_time)
+    if (final_energy_uj == -1 || final_time_us == -1)
     {
-        fprintf(stderr, "Failed to read final CPU consumption or time data, or time went backwards\n");
+        fprintf(stderr, "Failed to read final CPU consumption or time data\n");
 
         return 0.0f;
     }
 
-    int64_t time_diff_usec = final_time - initial_time;
-    int64_t energy_diff_uj = final_usage - initial_usage;
+    int64_t energy_delta_uj = final_energy_uj - initial_energy_uj;
+    int64_t time_delta_us = final_time_us - initial_time_us;
 
-    if (time_diff_usec <= 0 || energy_diff_uj < 0)
+    if (time_delta_us <= 0 || energy_delta_uj < 0)
     {
-        fprintf(stderr, "Invalid time or energy difference\n");
+        fprintf(stderr, "Invalid time or energy difference (time: %ld us, energy: %ld uJ)\n", time_delta_us, energy_delta_uj);
 
         return 0.0f;
     }
 
-    return (float)(energy_diff_uj) / (time_diff_usec / (float)USEC);
+    return (float)energy_delta_uj / (float)time_delta_us;
 }
 
+/**
+ * @brief Membaca nilai integer dari file yang ditentukan.
+ *
+ * @param path Path ke file.
+ * @return int Nilai integer yang dibaca dari file, atau -1 jika gagal.
+ */
 int read_int_from_file(const char *path)
 {
-    FILE *file = fopen(path, "r");
     int value = -1;
+    FILE *file = fopen(path, "r");
 
-    if (file && fscanf(file, "%d", &value) == 1)
-        fclose(file);
-    else
-    {
-        perror("Error reading file");
+    if (!file)
+        return -1;
 
-        if (file) fclose(file);
-    }
+    if (fscanf(file, "%d", &value) != 1)
+        value = -1;
+
+    fclose(file);
 
     return value;
 }
 
-int get_nvme_device_model(const char *nvme_device, char *device_model, size_t size)
+/**
+ * @brief Menemukan path hwmon berdasarkan nama.
+ *
+ * @param name Nama hwmon yang dicari.
+ * @param out_path Buffer untuk menyimpan path yang ditemukan.
+ * @param out_path_size Ukuran buffer out_path.
+ * @return int 0 jika berhasil, -1 jika gagal.
+ */
+static int find_hwmon_path_by_name(const char *name, char *out_path, size_t out_path_size)
 {
-    char command[BUFFER_SIZE];
+    glob_t hwmon_paths;
+    int found = -1;
 
-    snprintf(command, sizeof(command), "udevadm info --query=property --name=%sn1 | grep 'ID_MODEL='", nvme_device);
-    FILE *fp = popen(command, "r");
+    if (glob("/sys/class/hwmon/hwmon*", 0, NULL, &hwmon_paths) != 0)
+        return -1;
 
-    if (fp)
+    for (size_t i = 0; i < hwmon_paths.gl_pathc; i++)
     {
-        char line[BUFFER_SIZE];
+        char name_path[PATH_MAX];
 
-        while (fgets(line, sizeof(line), fp))
+        snprintf(name_path, sizeof(name_path), "%s/name", hwmon_paths.gl_pathv[i]);
+
+        FILE *f = fopen(name_path, "r");
+
+        if (!f)
+            continue;
+
+        char buffer[BUFFER_SIZE];
+
+        if (fgets(buffer, sizeof(buffer), f))
         {
-            if (strstr(line, "ID_MODEL=") != NULL)
+            buffer[strcspn(buffer, "\n")] = 0;
+
+            if (strcmp(buffer, name) == 0)
             {
-                char *start = strstr(line, "=");
+                strncpy(out_path, hwmon_paths.gl_pathv[i], out_path_size - 1);
 
-                if (start)
-                {
-                    start++;
-                    strncpy(device_model, start, size);
+                out_path[out_path_size - 1] = '\0';
+                found = 0;
 
-                    device_model[strcspn(device_model, "\n")] = 0;
+                fclose(f);
 
-                    pclose(fp);
-
-                    return 0;
-                }
+                break;
             }
         }
 
-        pclose(fp);
+        fclose(f);
     }
 
-    return -1;
+    globfree(&hwmon_paths);
+
+    return found;
 }
 
-int find_hwmon_path(const char *sensor_name, char *path, size_t size)
+/**
+ * @brief Mendeteksi jenis GPU yang ada di sistem (AMD, NVIDIA, atau tidak ada).
+ *
+ * @return enum GpuType Jenis GPU yang terdeteksi.
+ */
+static enum GpuType detect_gpu_type(void)
 {
-    char cmd[BUFFER_SIZE];
+    static enum GpuType cached_gpu_type = GPU_TYPE_UNINITIALIZED;
 
-    snprintf(cmd, sizeof(cmd), "grep -l '%s' /sys/class/hwmon/hwmon*/name", sensor_name);
-    FILE *fp = popen(cmd, "r");
+    if (cached_gpu_type != GPU_TYPE_UNINITIALIZED)
+        return cached_gpu_type;
 
-    if (fp && fgets(path, size, fp))
+    char hwmon_path[PATH_MAX];
+
+    if (find_hwmon_path_by_name("amdgpu", hwmon_path, sizeof(hwmon_path)) == 0)
     {
+        cached_gpu_type = GPU_TYPE_AMD;
+
+        return cached_gpu_type;
+    }
+
+#ifdef NVIDIA_GPU
+    FILE *fp = popen("nvidia-smi -L >/dev/null 2>&1 && echo 'NVIDIA'", "r");
+
+    if (fp)
+    {
+        char buffer[32];
+
+        if (fgets(buffer, sizeof(buffer), fp) != NULL && strstr(buffer, "NVIDIA"))
+            cached_gpu_type = GPU_TYPE_NVIDIA;
+
         pclose(fp);
 
-        path[strcspn(path, "\n")] = 0;
-        size_t len = strlen(path);
-
-        if (len >= 5)
-            path[len - 5] = '\0';
-        else
-            path[0] = '\0';
-
-        return 0;
+        if (cached_gpu_type == GPU_TYPE_NVIDIA)
+            return cached_gpu_type;
     }
-    if (fp) pclose(fp);
-    return -1;
+#endif
+
+    cached_gpu_type = GPU_TYPE_NONE;
+
+    return cached_gpu_type;
 }
 
-int find_nvme_hwmon_path(const char *nvme_device, char *hwmon_path, size_t max_len)
+#ifdef NVIDIA_GPU
+/**
+ * @brief Membaca suhu dan daya GPU NVIDIA menggunakan nvidia-smi.
+ *
+ * @param temperature Pointer ke float untuk menyimpan suhu GPU.
+ * @param power Pointer ke float untuk menyimpan penarikan daya GPU.
+ *
+ * @note Fungsi ini tidak efisien karena memanggil `nvidia-smi` melalui `popen`.
+ *       Untuk penggunaan produksi, pustaka NVML direkomendasikan.
+ */
+void read_nvidia_gpu_info(float *temperature, float *power)
 {
-    char command[BUFFER_SIZE];
-
-    snprintf(command, sizeof(command), "udevadm info --query=path %s", nvme_device);
-    FILE *fp = popen(command, "r");
-
-    if (fp && fgets(hwmon_path, max_len, fp))
-    {
-        pclose(fp);
-
-        hwmon_path[strcspn(hwmon_path, "\n")] = 0;
-
-        snprintf(command, sizeof(command), "find /sys%s -type d -name 'hwmon*'", hwmon_path);
-        fp = popen(command, "r");
-
-        if (fp && fgets(hwmon_path, max_len, fp))
-        {
-            pclose(fp);
-
-            hwmon_path[strcspn(hwmon_path, "\n")] = 0;
-
-            return 0;
-        }
-
-        if (fp) pclose(fp);
-    }
-
-    return -1;
-}
-
-int read_board_name(char *board_name, size_t size)
-{
-    FILE *file = fopen(BOARD_NAME_PATH, "r");
-
-    if (file)
-    {
-        if (fgets(board_name, size, file))
-        {
-            board_name[strcspn(board_name, "\n")] = 0;
-
-            fclose(file);
-
-            return 0;
-        }
-
-        fclose(file);
-    }
-
-    perror("Error reading board name file");
-
-    return -1;
-}
-
-void read_nvidia_gpu_info(float *temperature, float *power) {
     char command[BUFFER_SIZE] = "nvidia-smi --query-gpu=temperature.gpu,power.draw --format=csv,noheader";
     FILE *fp = popen(command, "r");
 
@@ -231,165 +331,295 @@ void read_nvidia_gpu_info(float *temperature, float *power) {
         *power = -1;
     }
 }
+#endif
 
-int main()
+/**
+ * @brief Mencetak informasi sistem (produsen dan produk).
+ */
+static void print_system_info(void)
 {
-    char board_name[BUFFER_SIZE], hwmon_path[BUFFER_SIZE], nvme_device_model[BUFFER_SIZE], temp_path[BUFFER_SIZE];
-    int mobo_temp, vrm_temp, pch_temp;
-    int radiator_fan, top_fans, bottom1_fans, bottom2_fans;
-    int cpu_tctl, cpu_tccd;
-    float cpu_power = 0.0f, gpu_edge = 0.0f, gpu_junction = 0.0f, gpu_mem = 0.0f, gpu_power = 0.0f;
-    int nvme_temps[4] = {-1, -1, -1, -1};
-    int dram_temps[2] = {-1, -1};
-    int amdgpu_exist = 0;
-    float gpu_temp_nvidia = -1.0f, gpu_power_nvidia = -1.0f;
+    char *board_manufacturer = execute_command("dmidecode -s system-manufacturer");
+    char *board_product = execute_command("dmidecode -s system-product-name");
 
-    if (find_hwmon_path("nct668*", hwmon_path, sizeof(hwmon_path)) == 0)
+    printf(BOLD "%s %s" RESET "\n", board_manufacturer ? board_manufacturer : "System", board_product ? board_product : "");
+
+    free(board_manufacturer);
+    free(board_product);
+}
+
+/**
+ * @brief Mencetak suhu motherboard dan kecepatan kipas.
+ */
+static void print_motherboard_and_fan_info(void)
+{
+    char hwmon_path[PATH_MAX], temp_path[PATH_MAX];
+    int mobo_temp = -1, vrm_temp = -1, pch_temp = -1;
+    int radiator_fan = -1, pump_fan = -1, top_fans = -1, bottom1_fans = -1, bottom2_fans = -1;
+
+    if (find_hwmon_path_by_name("nct668*", hwmon_path, sizeof(hwmon_path)) == 0)
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
+
         mobo_temp = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
+
         vrm_temp = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp4_input", hwmon_path);
+
         pch_temp = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/fan1_input", hwmon_path);
+
         radiator_fan = read_int_from_file(temp_path);
 
+        snprintf(temp_path, sizeof(temp_path), "%s/fan2_input", hwmon_path);
+
+        pump_fan = read_int_from_file(temp_path);
+
         snprintf(temp_path, sizeof(temp_path), "%s/fan3_input", hwmon_path);
+
         top_fans = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/fan4_input", hwmon_path);
+
         bottom1_fans = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/fan5_input", hwmon_path);
+
         bottom2_fans = read_int_from_file(temp_path);
     }
     else
     {
-        fprintf(stderr, "nct668* sensor module not found!\n");
-
-        return 1;
+        fprintf(stderr, "NCT668x sensor module not found!\n");
     }
 
-    if (find_hwmon_path("k10temp", hwmon_path, sizeof(hwmon_path)) == 0)
+    printf("Mobo     : %.2f°C\n", mobo_temp != -1 ? mobo_temp / 1000.0 : 0.0);
+    printf("VRM      : %.2f°C\n", vrm_temp != -1 ? vrm_temp / 1000.0 : 0.0);
+    printf("Chipset  : %.2f°C\n", pch_temp != -1 ? pch_temp / 1000.0 : 0.0);
+    printf("\n");
+
+    printf(BOLD "Lian Li Lancool II" RESET "\n");
+    printf("Radiator : %d RPM\n", radiator_fan != -1 ? radiator_fan : 0);
+    printf("Pump     : %d RPM\n", pump_fan != -1 ? pump_fan : 0);
+    printf("Top      : %d RPM\n", top_fans != -1 ? top_fans : 0);
+    printf("Bottom 1 : %d RPM\n", bottom1_fans != -1 ? bottom1_fans : 0);
+    printf("Bottom 2 : %d RPM\n", bottom2_fans != -1 ? bottom2_fans : 0);
+    printf("\n");
+}
+
+/**
+ * @brief Mencetak suhu dan daya CPU.
+ */
+static void print_cpu_info(void)
+{
+    char hwmon_path[PATH_MAX], temp_path[PATH_MAX];
+    int cpu_tctl = -1, cpu_tccd = -1;
+    float cpu_power = 0.0f;
+
+    if (find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) == 0)
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
+
         cpu_tctl = read_int_from_file(temp_path);
 
         snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
-        cpu_tccd = read_int_from_file(temp_path);
 
+        cpu_tccd = read_int_from_file(temp_path);
         cpu_power = calculate_cpu_power();
     }
     else
     {
         fprintf(stderr, "k10temp sensor module not found!\n");
-
-        return 1;
     }
 
-    if (find_hwmon_path("amdgpu", hwmon_path, sizeof(hwmon_path)) == 0)
-    {
-        snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
-        gpu_edge = read_int_from_file(temp_path);
+    char *processor_name = execute_command("dmidecode -s processor-version");
 
-        snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
-        gpu_junction = read_int_from_file(temp_path);
-
-        snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
-        gpu_mem = read_int_from_file(temp_path);
-
-        snprintf(temp_path, sizeof(temp_path), "%s/power1_average", hwmon_path);
-        gpu_power = read_int_from_file(temp_path);
-
-        amdgpu_exist = 1;
-    }
-
-    read_nvidia_gpu_info(&gpu_temp_nvidia, &gpu_power_nvidia);
-
-    if (read_board_name(board_name, sizeof(board_name)) == 0)
-    {
-        printf(BOLD "%s" RESET "\n", board_name);
-    }
-    else
-    {
-        printf(BOLD "Unknown Motherboard" RESET "\n");
-    }
-
-    printf("Mobo     : %.2f°C\n", mobo_temp >= 0 ? mobo_temp / 1000.0 : 0.0);
-    printf("VRM      : %.2f°C\n", vrm_temp >= 0 ? vrm_temp / 1000.0 : 0.0);
-    printf("Chipset  : %.2f°C\n", pch_temp >= 0 ? pch_temp / 1000.0 : 0.0);
+    printf(BOLD "%s" RESET "\n", processor_name ? processor_name : "CPU");
+    printf("Tctl     : %.2f°C\n", cpu_tctl != -1 ? cpu_tctl / 1000.0 : 0.0);
+    printf("Tccd     : %.2f°C\n", cpu_tccd != -1 ? cpu_tccd / 1000.0 : 0.0);
+    printf("Power    : %.2f W\n", cpu_power);
     printf("\n");
 
-    printf(BOLD "AMD Ryzen 7 7800X3D" RESET "\n");
-    printf("Tctl     : %.2f°C\n", cpu_tctl >= 0 ? cpu_tctl / 1000.0 : 0.0);
-    printf("Tccd     : %.2f°C\n", cpu_tccd >= 0 ? cpu_tccd / 1000.0 : 0.0);
-    printf("Power    : %.2f W\n", cpu_power / USEC);
+    free(processor_name);
+}
+
+/**
+ * @brief Mencetak suhu DRAM.
+ */
+static void print_dram_info(void)
+{
+    char temp_path[PATH_MAX];
+    char *dram_model = execute_command("dmidecode -t memory | grep \"Part Number:\" | awk '{$1=\"\"; print $0}' | sed 's/^ *//' | head -n 1");
+
+    printf(BOLD "%s" RESET "\n", dram_model ? dram_model : "DRAM");
+
+    int dram_temps[2] = {-1, -1};
+    glob_t spd_paths;
+
+    if (glob("/sys/class/hwmon/hwmon*/name", 0, NULL, &spd_paths) == 0)
+    {
+        int dram_idx = 0;
+
+        for (size_t i = 0; i < spd_paths.gl_pathc && dram_idx < 2; i++)
+        {
+            FILE *f = fopen(spd_paths.gl_pathv[i], "r");
+
+            if (!f)
+                continue;
+
+            char name_buf[32];
+
+            if (fgets(name_buf, sizeof(name_buf), f) && strncmp(name_buf, "spd5118", 7) == 0)
+            {
+                char *dir_path = dirname(spd_paths.gl_pathv[i]);
+
+                snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", dir_path);
+
+                dram_temps[dram_idx++] = read_int_from_file(temp_path);
+            }
+
+            fclose(f);
+        }
+    }
+
+    globfree(&spd_paths);
+
+    printf("DRAM 1   : %.2f°C\n", dram_temps[0] != -1 ? dram_temps[0] / 1000.0 : 0.0);
+    printf("DRAM 2   : %.2f°C\n", dram_temps[1] != -1 ? dram_temps[1] / 1000.0 : 0.0);
     printf("\n");
 
-    if (amdgpu_exist)
+    free(dram_model);
+}
+
+/**
+ * @brief Mendeteksi dan mencetak informasi suhu dan daya GPU.
+ */
+static void print_gpu_info(void)
+{
+    enum GpuType gpu_type = detect_gpu_type();
+
+    if (gpu_type == GPU_TYPE_AMD)
     {
-        printf(BOLD "AMD Radeon RX 6800 XT" RESET "\n");
-        printf("Edge     : %.2f°C\n", gpu_edge >= 0 ? gpu_edge / 1000.0 : 0.0);
-        printf("Junction : %.2f°C\n", gpu_junction >= 0 ? gpu_junction / 1000.0 : 0.0);
-        printf("Mem      : %.2f°C\n", gpu_mem >= 0 ? gpu_mem / 1000.0 : 0.0);
-        printf("Power    : %.2f W\n", gpu_power / USEC);
-        printf("\n");
-    }
+        char hwmon_path[PATH_MAX], temp_path[PATH_MAX];
+        float gpu_edge = 0.0f, gpu_junction = 0.0f, gpu_mem = 0.0f, gpu_power = 0.0f;
 
-    if (gpu_temp_nvidia > 0 && gpu_power_nvidia > 0)
-    {
-        printf(BOLD "NVIDIA RTX 3090" RESET "\n");
-        printf("Temp     : %.1f°C\n", gpu_temp_nvidia);
-        printf("Power    : %.1f W\n", gpu_power_nvidia);
-        printf("\n");
-    }
-
-    printf(BOLD "G-SKILL Trident Z5 Neo" RESET "\n");
-
-    for (int i = 0; i < 2; i++)
-    {
-        snprintf(hwmon_path, sizeof(hwmon_path), "/sys/class/hwmon/hwmon%d", 5 + i);
-
-        snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
-        dram_temps[i] = read_int_from_file(temp_path);
-
-        printf("DRAM %d   : %.2f°C\n", i + 1, dram_temps[i] >= 0 ? dram_temps[i] / 1000.0 : 0.0);
-    }
-
-    printf("\n");
-
-    for (int i = 0; i < 4; i++)
-    {
-        char nvme_device[BUFFER_SIZE];
-
-        snprintf(nvme_device, sizeof(nvme_device), "/dev/nvme%d", i);
-
-        if (find_nvme_hwmon_path(nvme_device, hwmon_path, sizeof(hwmon_path)) == 0)
+        if (find_hwmon_path_by_name("amdgpu", hwmon_path, sizeof(hwmon_path)) == 0)
         {
             snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", hwmon_path);
-            nvme_temps[i] = read_int_from_file(temp_path);
 
-            if (get_nvme_device_model(nvme_device, nvme_device_model, sizeof(nvme_device_model)) == 0)
-                printf(BOLD "%s" RESET "\n", nvme_device_model);
-            else
-                printf(BOLD "NVMe %d: Model name not found" RESET "\n", i + 1);
+            gpu_edge = read_int_from_file(temp_path);
 
-            printf("NAND     : %.2f°C\n", nvme_temps[i] >= 0 ? nvme_temps[i] / 1000.0 : 0.0);
+            snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
+
+            gpu_junction = read_int_from_file(temp_path);
+
+            snprintf(temp_path, sizeof(temp_path), "%s/temp3_input", hwmon_path);
+
+            gpu_mem = read_int_from_file(temp_path);
+
+            snprintf(temp_path, sizeof(temp_path), "%s/power1_average", hwmon_path);
+
+            gpu_power = read_int_from_file(temp_path);
+
+            printf(BOLD "AMD Radeon GPU" RESET "\n");
+            printf("Edge     : %.2f°C\n", gpu_edge != -1 ? gpu_edge / 1000.0 : 0.0);
+            printf("Junction : %.2f°C\n", gpu_junction != -1 ? gpu_junction / 1000.0 : 0.0);
+            printf("Mem      : %.2f°C\n", gpu_mem != -1 ? gpu_mem / 1000.0 : 0.0);
+            printf("Power    : %.2f W\n", gpu_power != -1 ? gpu_power / 1000000.0 : 0.0);
             printf("\n");
         }
-        else
-            printf("Failed to find hwmon path for %s\n", nvme_device);
+    }
+#ifdef NVIDIA_GPU
+    else if (gpu_type == GPU_TYPE_NVIDIA)
+    {
+        float gpu_temp_nvidia = -1.0f, gpu_power_nvidia = -1.0f;
+
+        read_nvidia_gpu_info(&gpu_temp_nvidia, &gpu_power_nvidia);
+
+        if (gpu_temp_nvidia > 0 && gpu_power_nvidia > 0)
+        {
+            char *nvidia_gpu_name = execute_command("nvidia-smi --query-gpu=gpu_name --format=csv,noheader");
+
+            printf(BOLD "%s" RESET "\n", nvidia_gpu_name ? nvidia_gpu_name : "NVIDIA GPU");
+            printf("Temp     : %.1f°C\n", gpu_temp_nvidia);
+            printf("Power    : %.1f W\n", gpu_power_nvidia);
+            printf("\n");
+
+            free(nvidia_gpu_name);
+        }
+    }
+#endif
+}
+
+/**
+ * @brief Mencetak suhu SSD NVMe.
+ */
+static void print_nvme_info(void)
+{
+    char temp_path[PATH_MAX];
+    glob_t nvme_paths;
+
+    if (glob("/sys/class/nvme/nvme*", 0, NULL, &nvme_paths) == 0)
+    {
+        for (size_t i = 0; i < nvme_paths.gl_pathc; i++)
+        {
+            char model[128] = "NVMe SSD";
+            char model_path[PATH_MAX];
+
+            snprintf(model_path, sizeof(model_path), "%s/model", nvme_paths.gl_pathv[i]);
+
+            FILE *f_model = fopen(model_path, "r");
+
+            if (f_model)
+            {
+                if (fgets(model, sizeof(model), f_model))
+                    model[strcspn(model, "\n")] = 0;
+
+                fclose(f_model);
+            }
+
+            char nvme_hwmon_path[PATH_MAX];
+
+            snprintf(nvme_hwmon_path, sizeof(nvme_hwmon_path), "%s/hwmon*", nvme_paths.gl_pathv[i]);
+
+            glob_t nvme_hwmon_glob;
+
+            if (glob(nvme_hwmon_path, 0, NULL, &nvme_hwmon_glob) == 0)
+            {
+                if (nvme_hwmon_glob.gl_pathc > 0)
+                {
+                    snprintf(temp_path, sizeof(temp_path), "%s/temp1_input", nvme_hwmon_glob.gl_pathv[0]);
+
+                    int nvme_temp = read_int_from_file(temp_path);
+
+                    printf(BOLD "%s" RESET "\n", model);
+                    printf("NAND     : %.2f°C\n", nvme_temp != -1 ? nvme_temp / 1000.0 : 0.0);
+                    printf("\n");
+                }
+
+                globfree(&nvme_hwmon_glob);
+            }
+        }
     }
 
-    printf(BOLD "Lian Li Lancool II" RESET "\n");
-    printf("Radiator : %d RPM\n", radiator_fan >= 0 ? radiator_fan : 0);
-    printf("Top      : %d RPM\n", top_fans >= 0 ? top_fans : 0);
-    printf("Bottom 1 : %d RPM\n", bottom1_fans >= 0 ? bottom1_fans : 0);
-    printf("Bottom 2 : %d RPM\n", bottom2_fans >= 0 ? bottom2_fans : 0);
+    globfree(&nvme_paths);
+}
+
+/**
+ * @brief Titik masuk utama untuk program pembacaan sensor.
+ *
+ * @return int 0 jika berhasil.
+ */
+int main()
+{
+    print_system_info();
+    print_motherboard_and_fan_info();
+    print_cpu_info();
+    print_dram_info();
+    print_gpu_info();
+    print_nvme_info();
 
     return 0;
 }
