@@ -216,6 +216,8 @@ static int find_hwmon_path_by_name(const char *name, char *out_path, size_t out_
 {
     glob_t hwmon_paths;
     int found = -1;
+    int max_fan_count = -1;
+    char best_path[PATH_MAX] = {0};
 
     if (glob("/sys/class/hwmon/hwmon*", 0, NULL, &hwmon_paths) != 0)
         return -1;
@@ -237,20 +239,44 @@ static int find_hwmon_path_by_name(const char *name, char *out_path, size_t out_
         {
             buffer[strcspn(buffer, "\n")] = 0;
 
-            if (strcmp(buffer, name) == 0)
+            if (strncmp(buffer, name, strlen(name)) == 0)
             {
-                strncpy(out_path, hwmon_paths.gl_pathv[i], out_path_size - 1);
+                // Count fan inputs for this hwmon device
+                int fan_count = 0;
+                for (int fan_num = 1; fan_num <= 10; fan_num++)
+                {
+                    char fan_path[PATH_MAX];
+                    snprintf(fan_path, sizeof(fan_path), "%s/fan%d_input", hwmon_paths.gl_pathv[i], fan_num);
+                    if (access(fan_path, F_OK) == 0)
+                        fan_count++;
+                }
 
-                out_path[out_path_size - 1] = '\0';
-                found = 0;
-
-                fclose(f);
-
-                break;
+                // For nct6799, prefer the device with more fan inputs
+                if (strcmp(buffer, name) == 0 && fan_count > max_fan_count)
+                {
+                    strncpy(best_path, hwmon_paths.gl_pathv[i], sizeof(best_path) - 1);
+                    best_path[sizeof(best_path) - 1] = '\0';
+                    max_fan_count = fan_count;
+                    found = 0;
+                }
+                // For other devices, use the first match
+                else if (strcmp(buffer, name) == 0 && found == -1)
+                {
+                    strncpy(best_path, hwmon_paths.gl_pathv[i], sizeof(best_path) - 1);
+                    best_path[sizeof(best_path) - 1] = '\0';
+                    max_fan_count = fan_count;
+                    found = 0;
+                }
             }
         }
 
         fclose(f);
+    }
+
+    if (found == 0)
+    {
+        strncpy(out_path, best_path, out_path_size - 1);
+        out_path[out_path_size - 1] = '\0';
     }
 
     globfree(&hwmon_paths);
@@ -356,7 +382,7 @@ static void print_motherboard_and_fan_info(void)
     int mobo_temp = -1, vrm_temp = -1, pch_temp = -1;
     int radiator_fan = -1, pump_fan = -1, top_fans = -1, bottom1_fans = -1, bottom2_fans = -1;
 
-    if (find_hwmon_path_by_name("nct668*", hwmon_path, sizeof(hwmon_path)) == 0)
+    if (find_hwmon_path_by_name("nct6799", hwmon_path, sizeof(hwmon_path)) == 0)
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
 
@@ -392,7 +418,7 @@ static void print_motherboard_and_fan_info(void)
     }
     else
     {
-        fprintf(stderr, "NCT668x sensor module not found!\n");
+        fprintf(stderr, "NCT679x sensor module not found!\n");
     }
 
     printf("Mobo     : %.2f°C\n", mobo_temp != -1 ? mobo_temp / 1000.0 : 0.0);

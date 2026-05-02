@@ -30,7 +30,7 @@
 #include <libgen.h>
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
-#define NUM_CPUS 16
+#define NUM_CPUS 32
 #define BUFFER_SIZE 256
 #define USEC 1000000
 
