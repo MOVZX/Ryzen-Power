@@ -542,10 +542,13 @@ void print_nvidia_gpu_info(void)
         if (nvmlDeviceGetMemoryInfo(device, &mem) == NVML_SUCCESS)
             fb_used = (float)mem.used / (1024.0f * 1024.0f * 1024.0f);
 
-        unsigned int temp;
+        nvmlTemperature_t temperature;
 
-        if (nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &temp) == NVML_SUCCESS)
-            gpu_temp = temp;
+        temperature.version = nvmlTemperature_v1;
+        temperature.sensorType = NVML_TEMPERATURE_GPU;
+
+        if (nvmlDeviceGetTemperatureV(device, &temperature) == NVML_SUCCESS)
+            gpu_temp = (unsigned int)temperature.temperature;
 
         unsigned int power;
 
