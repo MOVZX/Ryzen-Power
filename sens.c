@@ -34,7 +34,7 @@
 #include <dirent.h>
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
-#define BUFFER_SIZE 32
+#define BUFFER_SIZE 255
 #define USEC 1000000
 #define KILO 1000
 
@@ -251,7 +251,7 @@ static int find_hwmon_path_by_name(const char *name, char *out_path, size_t out_
                         fan_count++;
                 }
 
-                // For nct6799, prefer the device with more fan inputs
+                // For nct6686, prefer the device with more fan inputs
                 if (strcmp(buffer, name) == 0 && fan_count > max_fan_count)
                 {
                     strncpy(best_path, hwmon_paths.gl_pathv[i], sizeof(best_path) - 1);
@@ -382,7 +382,7 @@ static void print_motherboard_and_fan_info(void)
     int mobo_temp = -1, vrm_temp = -1, pch_temp = -1;
     int radiator_fan = -1, pump_fan = -1, top_fans = -1, bottom1_fans = -1, bottom2_fans = -1;
 
-    if (find_hwmon_path_by_name("nct6799", hwmon_path, sizeof(hwmon_path)) == 0)
+    if (find_hwmon_path_by_name("nct6686", hwmon_path, sizeof(hwmon_path)) == 0)
     {
         snprintf(temp_path, sizeof(temp_path), "%s/temp2_input", hwmon_path);
 
@@ -418,7 +418,7 @@ static void print_motherboard_and_fan_info(void)
     }
     else
     {
-        fprintf(stderr, "NCT679x sensor module not found!\n");
+        fprintf(stderr, "NCT6686 sensor module not found!\n");
     }
 
     printf("Mobo     : %.2f°C\n", mobo_temp != -1 ? mobo_temp / 1000.0 : 0.0);
