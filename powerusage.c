@@ -419,7 +419,7 @@ void print_cpu_info(void)
         dram_temperature2 = read_hwmon_temp(dram_paths[1], "temp1_input");
 
     if (used_memory_gb >= 0)
-        printf("󰻠   %.0f %% |    %.1f GB |    %d °C |    %d °C |    %d °C | 󰚥 %.0f W\n",
+        printf("󰻠 %.0f %% |  %.1f GB |  %d °C |  %d °C |  %d °C | 󰚥 %.0f W\n",
                cpu_usage, used_memory_gb,
                cpu_temperature1 != -1 ? cpu_temperature1 / 1000 : 0,
                dram_temperature1 != -1 ? dram_temperature1 / 1000 : 0,
@@ -444,7 +444,7 @@ void print_amd_gpu_info(void)
 
     if (gpu_temperature1 && gpu_usage && gpu_vram_usage)
     {
-        printf("󰻠   %.0f %% | 󰻠   %.0f %% |    %.0f °C |    %.0f °C |    %.0f °C | 󰚥 %.0f W\n",
+        printf("󰻠 %.0f %% | 󰻠 %.0f %% |  %.0f °C |  %.0f °C |  %.0f °C | 󰚥 %.0f W\n",
                atof(gpu_usage),
                atof(gpu_vram_usage),
                atof(gpu_temperature1),
@@ -600,7 +600,7 @@ void print_nvidia_gpu_info(void)
             break;
         }
 
-        printf("󰻠   %u %% |    %.1f GB |    %u °C |    %u °C |    %u °C | 󰚥 %u W\n",
+        printf("󰻠 %u %% |  %.1f GB |  %u °C |  %u °C |  %u °C | 󰚥 %u W\n",
                gpu_util, fb_used, gpu_temp, hotspot_temp, vram_temp, power_usage);
 
         break;
