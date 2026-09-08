@@ -41,6 +41,7 @@
 #endif
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
+#define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 #define MAX_NAME_LENGTH 300
 #define USEC 1000000
 #define KILO 1000
@@ -60,6 +61,7 @@
 
 float get_memory_usage(void);
 int64_t get_cpuConsumptionUJoules(void);
+int64_t get_raplRangeUJoules(void);
 int64_t get_currentTimeUSec(void);
 char *execute_command(const char *command);
 void print_cpu_info(void);
@@ -151,6 +153,32 @@ int64_t get_cpuConsumptionUJoules(void)
     fclose(file);
 
     return consumption;
+}
+
+/**
+ * @brief Membaca rentang (wrap range) counter energi RAPL dalam mikrojoule.
+ *
+ * Pada kernel 7.x, counter ber-wrap setiap max_energy_range_uj,
+ * bukan kumulatif. Userspace harus menangani wrap-nya.
+ *
+ * @return int64_t Rentang counter dalam mikrojoule, atau -1 jika gagal.
+ */
+int64_t get_raplRangeUJoules(void)
+{
+    int64_t range = -1;
+    FILE *file = fopen(RAPL_RANGE_PATH, "r");
+
+    if (!file || fscanf(file, "%ld", &range) != 1)
+    {
+        if (file)
+            fclose(file);
+
+        return -1;
+    }
+
+    fclose(file);
+
+    return range;
 }
 
 /**
@@ -387,6 +415,16 @@ void print_cpu_info(void)
     float cpu_power = 0.0f;
     int64_t energy_delta_uj = final_energy_uj - initial_energy_uj;
     int64_t time_delta_us = final_time_us - initial_time_us;
+
+    /* Counter bisa ber-wrap di dalam interval; kembalikan rentangnya.
+     * Maksimal satu wrap per detik (rentang ~65 kJ vs energi ~kJ/detik). */
+    if (energy_delta_uj < 0)
+    {
+        int64_t range = get_raplRangeUJoules();
+
+        if (range > 0)
+            energy_delta_uj += range;
+    }
 
     if (energy_delta_uj >= 0 && time_delta_us > 0)
         cpu_power = (float)energy_delta_uj / (float)time_delta_us;

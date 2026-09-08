@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #define RAPL_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
+#define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 #define USEC 1000000
 
 /**
@@ -85,6 +86,30 @@ int64_t get_cpu_consumption_ujoules()
 }
 
 /**
+ * @brief Membaca rentang (wrap range) counter energi RAPL dalam mikrojoule.
+ *
+ * Pada kernel 7.x, counter ber-wrap setiap max_energy_range_uj,
+ * bukan kumulatif. Userspace harus menangani wrap-nya.
+ *
+ * @return int64_t Rentang counter dalam mikrojoule, atau -1 jika gagal.
+ */
+int64_t get_rapl_range_uj()
+{
+    int64_t range = -1;
+    FILE *file = fopen(RAPL_RANGE_PATH, "r");
+
+    if (file == NULL)
+        return -1;
+
+    if (fscanf(file, "%ld", &range) != 1)
+        range = -1;
+
+    fclose(file);
+
+    return range;
+}
+
+/**
  * @brief Menghitung konsumsi daya CPU saat ini dalam Watt.
  *
  * Fungsi ini mengukur perubahan konsumsi energi selama interval satu detik
@@ -113,6 +138,19 @@ float get_cpu_consumption_watts()
 
     if (time_diff_us <= 0)
         return 0;
+
+    /* Counter bisa ber-wrap di dalam interval; kembalikan rentangnya.
+     * Maksimal satu wrap per detik (rentang ~65 kJ vs energi ~kJ/detik). */
+    if (energy_diff_uj < 0)
+    {
+        int64_t range = get_rapl_range_uj();
+
+        if (range > 0)
+            energy_diff_uj += range;
+    }
+
+    if (energy_diff_uj < 0)
+        return -1.0f;
 
     float watts = (float)energy_diff_uj / (float)time_diff_us;
 

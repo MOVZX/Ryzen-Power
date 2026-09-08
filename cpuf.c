@@ -30,6 +30,7 @@
 #include <libgen.h>
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
+#define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 #define BUFFER_SIZE 256
 #define USEC 1000000
 
@@ -105,21 +106,43 @@ int64_t get_current_time_usec()
 }
 
 /**
- * @brief Menghitung daya CPU rata-rata dalam Watt selama interval 1 detik.
+ * @brief Membaca rentang (wrap range) counter energi RAPL dalam mikrojoule.
+ *
+ * Pada kernel 7.x, energy_uj adalah counter mentah yang ber-wrap setiap
+ * max_energy_range_uj, bukan kumulatif. Userspace harus menangani wrap-nya.
+ *
+ * @return int64_t Rentang counter dalam mikrojoule, atau -1 jika gagal.
+ */
+int64_t get_rapl_range_uj()
+{
+    int64_t range = -1;
+    FILE *file = fopen(RAPL_RANGE_PATH, "r");
+
+    if (file == NULL)
+        return -1;
+
+    if (fscanf(file, "%ld", &range) != 1)
+        range = -1;
+
+    fclose(file);
+
+    return range;
+}
+
+/**
+ * @brief Membaca counter dua kali (jeda 1 detik) dan menghitung dayanya.
+ *
+ * Mengoreksi wrap counter dengan max_energy_range_uj.
  *
  * @return float Daya CPU dalam Watt, atau -1.0f jika gagal.
  */
-float calculate_cpu_power()
+static float read_power_once()
 {
     int64_t initial_usage = get_cpu_consumption_ujoules();
     int64_t initial_time = get_current_time_usec();
 
     if (initial_usage == -1 || initial_time == -1)
-    {
-        fprintf(stderr, "Failed to read initial CPU consumption or time data\n");
-
         return -1.0f;
-    }
 
     sleep(1);
 
@@ -127,30 +150,49 @@ float calculate_cpu_power()
     int64_t final_time = get_current_time_usec();
 
     if (final_usage == -1 || final_time == -1)
-    {
-        fprintf(stderr, "Failed to read final CPU consumption or time data\n");
-
         return -1.0f;
-    }
 
     if (final_time <= initial_time)
-    {
-        fprintf(stderr, "Time did not advance or went backwards!\n");
-
         return -1.0f;
-    }
 
     int64_t energy_diff_uj = final_usage - initial_usage;
-    int64_t time_diff_usec = final_time - initial_time;
 
+    /* Counter bisa ber-wrap di dalam interval ini; kembalikan rentangnya.
+     * Maksimal satu wrap per detik (rentang ~65 kJ vs energi ~kJ/detik). */
     if (energy_diff_uj < 0)
     {
-        fprintf(stderr, "Energy consumption decreased, which is not possible.\n");
+        int64_t range = get_rapl_range_uj();
 
-        return -1.0f;
+        if (range > 0)
+            energy_diff_uj += range;
     }
 
-    return (float)energy_diff_uj / (float)time_diff_usec;
+    if (energy_diff_uj < 0)
+        return -1.0f;
+
+    return (float)energy_diff_uj / (float)(final_time - initial_time);
+}
+
+/**
+ * @brief Menghitung daya CPU rata-rata dalam Watt selama interval 1 detik.
+ *
+ * Rentang wrap yang dilaporkan kernel bisa sedikit lebih kecil dari titik
+ * wrap sebenarnya, sehingga selang 1 detik yang memotong wrap bisa menghasilkan
+ * diff negatif palsu. Ukur sekali lagi sebelum menyerah.
+ *
+ * @return float Daya CPU dalam Watt, atau -1.0f jika gagal.
+ */
+float calculate_cpu_power()
+{
+    float power = read_power_once();
+
+    if (power < 0)
+        power = read_power_once();
+
+    if (power < 0)
+        fprintf(stderr, "Failed to measure CPU power (energy counter anomaly)\n");
+
+    return power;
 }
 
 /**
@@ -395,7 +437,11 @@ void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power
     for (int i = 0; i < sensor_count; i++)
         printf("%-7s : %8d°C\n", sensors[i].label, sensors[i].value != -1 ? sensors[i].value / 1000 : 0);
 
-    printf("Power   : %8.2f W\n", cpu_power);
+    if (cpu_power >= 0)
+        printf("Power   : %8.2f W\n", cpu_power);
+    else
+        printf("Power   :       N/A\n");
+
     printf("\n");
 
     for (int i = 0; i < cpu_count; i++)
@@ -462,13 +508,8 @@ int main()
 
         float cpu_power = calculate_cpu_power();
 
-        if (cpu_power < 0)
-        {
-            free(cpu_freqs);
-            free(stats);
-
-            return 1;
-        }
+        /* Kegagalan sesaat (mis. wrap counter RAPL) tidak boleh mematikan
+         * monitor; tampilkan N/A untuk tick ini dan lanjut. */
 
         get_cpu_frequencies(cpu_freqs, cpu_count);
         record_sample(stats, cpu_freqs, cpu_count);
