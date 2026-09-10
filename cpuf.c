@@ -51,7 +51,6 @@ typedef struct
 typedef struct
 {
     int last;
-    int min;
     int max;
     long long sum;
     long count;
@@ -385,7 +384,7 @@ void get_cpu_frequencies(int *freqs, int cpu_count)
 /**
  * @brief Mencatat satu sampel frekuensi ke statistik per-core.
  *
- * Nilai 0 (gagal baca) diabaikan agar tidak merusak min.
+ * Nilai 0 (gagal baca) diabaikan agar tidak merusak max.
  *
  * @param stats Array statistik frekuensi per-core.
  * @param freqs Array frekuensi inti CPU dalam MHz.
@@ -402,14 +401,10 @@ void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
 
         if (stats[i].count == 0)
         {
-            stats[i].min = freq;
             stats[i].max = freq;
         }
         else
         {
-            if (freq < stats[i].min)
-                stats[i].min = freq;
-
             if (freq > stats[i].max)
                 stats[i].max = freq;
         }
@@ -418,6 +413,53 @@ void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
         stats[i].sum += freq;
         stats[i].count++;
     }
+}
+
+/**
+ * @brief Format angka MHz dengan pemisah ribuan gaya Indonesia (titik).
+ *
+ * Contoh: 5712 menjadi "5.712 MHz", 624 menjadi "624 MHz".
+ *
+ * @param buf   Buffer tujuan.
+ * @param size  Ukuran buffer.
+ * @param mhz   Nilai frekuensi dalam MHz.
+ * @return const char * Pointer ke buffer.
+ */
+static const char *fmt_mhz(char *buf, size_t size, int mhz)
+{
+    char digits[16];
+    int neg = mhz < 0;
+    unsigned int v = neg ? (unsigned int)-(long)mhz : (unsigned int)mhz;
+    int n = 0;
+
+    do
+    {
+        digits[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (v && n < (int)sizeof(digits));
+
+    int pos = 0;
+
+    if (neg && pos < (int)size - 1)
+        buf[pos++] = '-';
+
+    for (int i = n - 1; i >= 0; i--)
+    {
+        /* Titik dicetak di depan digit kalau sisa digit (termasuk yang ini)
+         * habis dibagi 3, dan bukan di paling depan. */
+        int remaining = i + 1;
+
+        if (pos > (neg ? 1 : 0) && remaining % 3 == 0 && pos < (int)size - 1)
+            buf[pos++] = '.';
+
+        if (pos < (int)size - 1)
+            buf[pos++] = digits[i];
+    }
+
+    snprintf(buf + pos, size - (size_t)pos, " MHz");
+
+    return buf;
 }
 
 /**
@@ -445,7 +487,14 @@ void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power
     printf("\n");
 
     for (int i = 0; i < cpu_count; i++)
-        printf("CPU %2d  : %6d MHz  (min %6d / max %6d)\n", i, stats[i].last, stats[i].min, stats[i].max);
+    {
+        char flast[24], fmax[24];
+
+        printf("CPU %2d  : %12s  (max %12s)\n",
+               i,
+               fmt_mhz(flast, sizeof(flast), stats[i].last),
+               fmt_mhz(fmax, sizeof(fmax), stats[i].max));
+    }
 
     printf("\n");
 }
@@ -454,7 +503,7 @@ void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power
  * @brief Titik masuk utama untuk program.
  *
  * Menjalankan loop terus: tiap detik membaca suhu, daya, dan
- * frekuensi, lalu mencetak status. Min/max per-core dihitung
+ * frekuensi, lalu mencetak status. Max per-core dihitung
  * sejak program dijalankan. Berhenti dengan Ctrl+C.
  *
  * @return int 0 jika berhasil, 1 jika gagal.

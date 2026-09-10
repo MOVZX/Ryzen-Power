@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <sys/file.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <pci/pci.h>
@@ -58,6 +60,12 @@
 #define MAX_DEVICES 1
 #define DEBUG 0
 #define BUFFER_SIZE 32
+#define CPU_STATS_PATH "/tmp/cpu_stats.txt"
+
+/* Suhu DRAM (sensor spd5118) dimatikan secara default.
+ * Build dengan dukungan DRAM:
+ *   gcc -O3 -DENABLE_DRAM ...   atau   ENABLE_DRAM=1 ./build.sh
+ */
 
 float get_memory_usage(void);
 int64_t get_cpuConsumptionUJoules(void);
@@ -65,6 +73,7 @@ int64_t get_raplRangeUJoules(void);
 int64_t get_currentTimeUSec(void);
 char *execute_command(const char *command);
 void print_cpu_info(void);
+void update_cpu_freqs(int *out_avg, int *out_max);
 void print_amd_gpu_info(void);
 
 #ifdef NVIDIA_GPU
@@ -335,6 +344,230 @@ static int read_hwmon_temp(const char *hwmon_path, const char *temp_file)
 }
 
 /**
+ * @brief Format angka MHz dengan pemisah ribuan gaya Indonesia (titik).
+ *
+ * Contoh: 5712 menjadi "5.712 MHz", 624 menjadi "624 MHz".
+ *
+ * @param buf   Buffer tujuan.
+ * @param size  Ukuran buffer.
+ * @param mhz   Nilai frekuensi dalam MHz.
+ * @return const char * Pointer ke buffer.
+ */
+static const char *fmt_mhz(char *buf, size_t size, int mhz)
+{
+    char digits[16];
+    int neg = mhz < 0;
+    unsigned int v = neg ? (unsigned int)-(long)mhz : (unsigned int)mhz;
+    int n = 0;
+
+    do
+    {
+        digits[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (v && n < (int)sizeof(digits));
+
+    int pos = 0;
+
+    if (neg && pos < (int)size - 1)
+        buf[pos++] = '-';
+
+    for (int i = n - 1; i >= 0; i--)
+    {
+        /* Titik dicetak di depan digit kalau sisa digit (termasuk yang ini)
+         * habis dibagi 3, dan bukan di paling depan. */
+        int remaining = i + 1;
+
+        if (pos > (neg ? 1 : 0) && remaining % 3 == 0 && pos < (int)size - 1)
+            buf[pos++] = '.';
+
+        if (pos < (int)size - 1)
+            buf[pos++] = digits[i];
+    }
+
+    snprintf(buf + pos, size - (size_t)pos, " MHz");
+
+    return buf;
+}
+
+/**
+ * @brief Mengambil frekuensi CPU (MHz) dari seluruh core: rata-rata, maksimum.
+ *
+ * Fungsi ini membaca scaling_cur_freq setiap core yang online (jalur "cpu", dengan
+ * fallback "platform-cpufreq" untuk kernel 6.10+), lalu menghitung frekuensi
+ * terendah, rata-rata (frekuensi saat ini) dan tertinggi di semua core.
+ *
+ * @param out_avg  Penyimpanan frekuensi rata-rata MHz (-1 jika tidak ada data).
+ * @param out_max  Penyimpanan frekuensi maksimum MHz (-1 jika tidak ada data).
+ */
+static void get_cpu_freqs(int *out_avg, int *out_max)
+{
+    char path[PATH_MAX];
+    int max_mhz = -1, sum_mhz = 0, count = 0;
+
+    for (int cpu = 0;; cpu++)
+    {
+        int found = 0;
+
+        /* dua possible jalur: "cpu" (umum) dan "platform-cpufreq" (kernel 6.10+) */
+        for (int attempt = 0; attempt < 2 && !found; attempt++)
+        {
+            if (attempt == 0)
+                snprintf(path, sizeof(path),
+                         "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+            else
+                snprintf(path, sizeof(path),
+                         "/sys/devices/system/cpu/platform-cpufreq/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+
+            FILE *cf = fopen(path, "r");
+
+            if (!cf)
+                continue;
+
+            long long khz = 0;
+
+            if (fscanf(cf, "%lld", &khz) != 1)
+                khz = 0;
+
+            fclose(cf);
+
+            if (khz <= 0)
+                continue; /* core offline atau tidak ada data */
+
+            int mhz = (int)(khz / 1000);
+
+            if (mhz > max_mhz)
+                max_mhz = mhz;
+
+            sum_mhz += mhz;
+            count++;
+            found = 1;
+        }
+
+        if (found == 0)
+        {
+            /* core berikutnya belum tentu ada; berhenti kalau direktorinya pun tidak ada */
+            snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq", cpu);
+
+            struct stat st;
+
+            if (stat(path, &st) != 0)
+                break;
+        }
+    }
+
+    *out_max = max_mhz;
+    *out_avg = count > 0 ? (int)((sum_mhz + count / 2) / count) : -1;
+}
+
+/**
+ * @brief Baca - gabung - simpan statistik frekuensi CPU dalam satu operasi terkunci.
+ *
+ * File: /tmp/cpu_stats.txt dengan format "KUNCI: angka" per baris
+ * (AVG, MAX). MAX adalah frekuensi tertinggi yang pernah tercatat, AVG adalah rata-rata core
+ * pada sampling terakhir.
+ *
+ * Penguncian pakai flock() karena aplikasi ini berjalan sekali jalan (single shot)
+ * dan bisa dipanggil bergantian (misalnya poller panel) - tanpa lock, dua penulis
+ * bisa saling menimpa sehingga MAX terlihat turun.
+ *
+ * @param out_avg  Penyimpanan AVG MHz.
+ * @param out_max  Penyimpanan MAX gabungan MHz.
+ */
+void update_cpu_freqs(int *out_avg, int *out_max)
+{
+    int cur_avg = -1, cur_max = -1;
+
+    get_cpu_freqs(&cur_avg, &cur_max);
+
+    int lock_fd = open(CPU_STATS_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+
+    if (lock_fd < 0)
+    {
+        /* Tidak bisa membuka file: tampilkan hasil sampling saja. */
+        *out_avg = cur_avg;
+        *out_max = cur_max;
+
+        return;
+    }
+
+    flock(lock_fd, LOCK_EX);
+
+    /* Baca ulang DI DALAM lock supaya nilai yang digabung benar-benar terakhir. */
+    int old_avg = -1, old_max = -1;
+    char line[64];
+    char key[16];
+    int value;
+    FILE *f = fdopen(lock_fd, "r");
+
+    if (f)
+    {
+        if (fseek(f, 0, SEEK_SET) == 0)
+        {
+            while (fgets(line, sizeof(line), f))
+            {
+                if (sscanf(line, "%15[a-zA-Z_]: %d", key, &value) != 2)
+                    continue;
+
+                if (strcmp(key, "AVG") == 0)
+                    old_avg = value;
+                else if (strcmp(key, "MAX") == 0)
+                    old_max = value;
+            }
+        }
+
+    }
+
+    /* MAX: hanya boleh naik. AVG: sampel terbaru. */
+
+    int max_mhz = cur_max;
+
+    if (max_mhz < 0)
+        max_mhz = old_max;
+    else if (old_max > max_mhz)
+        max_mhz = old_max;
+
+    int avg_mhz = cur_avg >= 0 ? cur_avg : old_avg;
+
+    /* Hanya tulis kalau ada yang berubah: MAX baru lebih tinggi, atau AVG berubah.
+     * Nilai lama tidak pernah ditimpa oleh angka yang
+     * lebih buruk. Tulis lewat file sementara unik lalu rename (atomic). */
+    int changed = (max_mhz != old_max) || (avg_mhz != old_avg);
+
+    if (changed && max_mhz >= 0)
+    {
+        char tmp_path[] = "/tmp/cpu_stats.XXXXXX";
+        int tmp_fd = mkstemp(tmp_path);
+
+        if (tmp_fd >= 0)
+        {
+            FILE *tf = fdopen(tmp_fd, "w");
+
+            if (tf)
+            {
+                fprintf(tf, "AVG: %d\n", avg_mhz);
+                fprintf(tf, "MAX: %d\n", max_mhz);
+                fclose(tf);
+                rename(tmp_path, CPU_STATS_PATH);
+            }
+            else
+            {
+                close(tmp_fd);
+                unlink(tmp_path);
+            }
+        }
+    }
+
+    flock(lock_fd, LOCK_UN);
+
+    if (!f)
+        close(lock_fd);
+
+    *out_avg = avg_mhz;
+    *out_max = max_mhz;
+}
+
+/**
  * @brief Mengambil waktu CPU total dan idle dari /proc/stat.
  *
  * @param times Pointer ke struktur CpuTimes untuk menyimpan hasilnya.
@@ -437,17 +670,23 @@ void print_cpu_info(void)
         cpu_usage = 100.0f * (float)(total_diff - idle_diff) / (float)total_diff;
 
     float used_memory_gb = get_memory_usage();
+    int freq_avg = -1, freq_max = -1;
     int cpu_temperature1 = -1;
+#ifdef ENABLE_DRAM
     int dram_temperature1 = -1;
     int dram_temperature2 = -1;
-    char cpu_hwmon_paths[1][PATH_MAX];
     char dram_paths[2][PATH_MAX];
+#endif
+    char cpu_hwmon_paths[1][PATH_MAX];
 
     if (find_all_hwmon_by_name("k10temp", cpu_hwmon_paths, 1) > 0)
         cpu_temperature1 = read_hwmon_temp(cpu_hwmon_paths[0], "temp1_input");
     else if (find_all_hwmon_by_name("coretemp", cpu_hwmon_paths, 1) > 0)
         cpu_temperature1 = read_hwmon_temp(cpu_hwmon_paths[0], "temp1_input");
 
+    update_cpu_freqs(&freq_avg, &freq_max);
+
+#ifdef ENABLE_DRAM
     int num_dram_sensors = find_all_hwmon_by_name("spd5118", dram_paths, 2);
 
     if (num_dram_sensors > 0)
@@ -455,14 +694,26 @@ void print_cpu_info(void)
 
     if (num_dram_sensors > 1)
         dram_temperature2 = read_hwmon_temp(dram_paths[1], "temp1_input");
+#endif
 
     if (used_memory_gb >= 0)
-        printf("󰻠 %.0f %% |  %.1f GB |  %d °C |  %d °C |  %d °C | 󰚥 %.0f W\n",
-               cpu_usage, used_memory_gb,
+    {
+        char favg[24], fmax[24];
+
+        printf("󰻠 %.0f %% | 󰾾 %s | 󰾾 %s |  %.1f GB |  %d °C | "
+#ifdef ENABLE_DRAM
+               " %d °C |  %d °C | "
+#endif
+               "󰚥 %.0f W\n",
+               cpu_usage, fmt_mhz(favg, sizeof(favg), freq_avg),
+               fmt_mhz(fmax, sizeof(fmax), freq_max), used_memory_gb,
                cpu_temperature1 != -1 ? cpu_temperature1 / 1000 : 0,
+#ifdef ENABLE_DRAM
                dram_temperature1 != -1 ? dram_temperature1 / 1000 : 0,
                dram_temperature2 != -1 ? dram_temperature2 / 1000 : 0,
+#endif
                cpu_power);
+    }
 }
 
 /**
@@ -479,12 +730,16 @@ void print_amd_gpu_info(void)
     char *gpu_temperature2 = execute_command("rocm-smi -t | awk '/Temperature \\(Sensor junction\\) \\(C\\):/ {print $NF}'");
     char *gpu_temperature3 = execute_command("rocm-smi -t | awk '/Temperature \\(Sensor memory\\) \\(C\\):/ {print $NF}'");
     char *gpu_power = execute_command("rocm-smi -P | awk '/Average Graphics Package Power \\(W\\):/ {print $NF}'");
+    char *gpu_clock = execute_command("rocm-smi --showclocks | awk '/sclk/ {print $3; exit}'");
 
     if (gpu_temperature1 && gpu_usage && gpu_vram_usage)
     {
-        printf("󰻠 %.0f %% | 󰻠 %.0f %% |  %.0f °C |  %.0f °C |  %.0f °C | 󰚥 %.0f W\n",
+        char fclk[24];
+
+        printf("󰻠 %.0f %% | 󰻠 %.0f %% | 󰾾 %s |  %.0f °C |  %.0f °C |  %.0f °C | 󰚥 %.0f W\n",
                atof(gpu_usage),
                atof(gpu_vram_usage),
+               fmt_mhz(fclk, sizeof(fclk), gpu_clock ? atoi(gpu_clock) : 0),
                atof(gpu_temperature1),
                gpu_temperature2 ? atof(gpu_temperature2) : 0.0f,
                gpu_temperature3 ? atof(gpu_temperature3) : 0.0f,
@@ -508,6 +763,9 @@ void print_amd_gpu_info(void)
 
     if (gpu_power)
         free(gpu_power);
+
+    if (gpu_clock)
+        free(gpu_clock);
 }
 
 #ifdef NVIDIA_GPU
@@ -575,6 +833,12 @@ void print_nvidia_gpu_info(void)
         if (nvmlDeviceGetUtilizationRates(device, &util) == NVML_SUCCESS)
             gpu_util = util.gpu;
 
+        /* Frekuensi inti GPU saat ini (MHz). */
+        unsigned int gpu_clock = 0;
+
+        if (nvmlDeviceGetClock(device, NVML_CLOCK_GRAPHICS, NVML_CLOCK_ID_CURRENT, &gpu_clock) != NVML_SUCCESS)
+            gpu_clock = 0;
+
         nvmlMemory_t mem;
 
         if (nvmlDeviceGetMemoryInfo(device, &mem) == NVML_SUCCESS)
@@ -638,8 +902,11 @@ void print_nvidia_gpu_info(void)
             break;
         }
 
-        printf("󰻠 %u %% |  %.1f GB |  %u °C |  %u °C |  %u °C | 󰚥 %u W\n",
-               gpu_util, fb_used, gpu_temp, hotspot_temp, vram_temp, power_usage);
+        char fclk[24];
+
+        printf("󰻠 %u %% | 󰾾 %s |  %.1f GB |  %u °C |  %u °C |  %u °C | 󰚥 %u W\n",
+               gpu_util, fmt_mhz(fclk, sizeof(fclk), (int)gpu_clock),
+               fb_used, gpu_temp, hotspot_temp, vram_temp, power_usage);
 
         break;
     }
