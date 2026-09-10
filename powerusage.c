@@ -731,15 +731,17 @@ void print_amd_gpu_info(void)
     char *gpu_temperature3 = execute_command("rocm-smi -t | awk '/Temperature \\(Sensor memory\\) \\(C\\):/ {print $NF}'");
     char *gpu_power = execute_command("rocm-smi -P | awk '/Average Graphics Package Power \\(W\\):/ {print $NF}'");
     char *gpu_clock = execute_command("rocm-smi --showclocks | awk '/sclk/ {print $3; exit}'");
+    char *gpu_mem_clock = execute_command("rocm-smi --showclocks | awk '/mclk/ {print $3; exit}'");
 
     if (gpu_temperature1 && gpu_usage && gpu_vram_usage)
     {
-        char fclk[24];
+        char fclk[24], fmemclk[24];
 
-        printf("󰻠 %.0f %% | 󰻠 %.0f %% | 󰾾 %s |  %.0f °C |  %.0f °C |  %.0f °C | 󰚥 %.0f W\n",
+        printf("󰻠 %.0f %% | 󰻠 %.0f %% | 󰾾 %s | 󰾾 %s |  %.0f °C |  %.0f °C |  %.0f °C | 󰚥 %.0f W\n",
                atof(gpu_usage),
                atof(gpu_vram_usage),
                fmt_mhz(fclk, sizeof(fclk), gpu_clock ? atoi(gpu_clock) : 0),
+               fmt_mhz(fmemclk, sizeof(fmemclk), gpu_mem_clock ? atoi(gpu_mem_clock) : 0),
                atof(gpu_temperature1),
                gpu_temperature2 ? atof(gpu_temperature2) : 0.0f,
                gpu_temperature3 ? atof(gpu_temperature3) : 0.0f,
@@ -766,6 +768,9 @@ void print_amd_gpu_info(void)
 
     if (gpu_clock)
         free(gpu_clock);
+
+    if (gpu_mem_clock)
+        free(gpu_mem_clock);
 }
 
 #ifdef NVIDIA_GPU
@@ -839,6 +844,12 @@ void print_nvidia_gpu_info(void)
         if (nvmlDeviceGetClock(device, NVML_CLOCK_GRAPHICS, NVML_CLOCK_ID_CURRENT, &gpu_clock) != NVML_SUCCESS)
             gpu_clock = 0;
 
+        /* Frekuensi VRAM saat ini (MHz). */
+        unsigned int mem_clock = 0;
+
+        if (nvmlDeviceGetClock(device, NVML_CLOCK_MEM, NVML_CLOCK_ID_CURRENT, &mem_clock) != NVML_SUCCESS)
+            mem_clock = 0;
+
         nvmlMemory_t mem;
 
         if (nvmlDeviceGetMemoryInfo(device, &mem) == NVML_SUCCESS)
@@ -902,10 +913,11 @@ void print_nvidia_gpu_info(void)
             break;
         }
 
-        char fclk[24];
+        char fclk[24], fmemclk[24];
 
-        printf("󰻠 %u %% | 󰾾 %s |  %.1f GB |  %u °C |  %u °C |  %u °C | 󰚥 %u W\n",
+        printf("󰻠 %u %% | 󰾾 %s | 󰾾 %s |  %.1f GB |  %u °C |  %u °C |  %u °C | 󰚥 %u W\n",
                gpu_util, fmt_mhz(fclk, sizeof(fclk), (int)gpu_clock),
+               fmt_mhz(fmemclk, sizeof(fmemclk), (int)mem_clock),
                fb_used, gpu_temp, hotspot_temp, vram_temp, power_usage);
 
         break;

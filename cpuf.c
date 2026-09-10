@@ -39,7 +39,7 @@
 #define CLEAR_SCREEN "\033[2J"
 #define CURSOR_HOME "\033[H"
 
-#define MAX_CPU_SENSORS 8
+#define MAX_CPU_SENSORS 16
 #define MAX_TEMP_IDX 16
 
 typedef struct
@@ -490,7 +490,7 @@ void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power
     {
         char flast[24], fmax[24];
 
-        printf("CPU %2d  : %12s  (max %12s)\n",
+        printf("CPU %2d : %10s  (max %8s)\n",
                i,
                fmt_mhz(flast, sizeof(flast), stats[i].last),
                fmt_mhz(fmax, sizeof(fmax), stats[i].max));
