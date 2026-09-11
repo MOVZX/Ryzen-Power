@@ -73,7 +73,7 @@ int64_t get_raplRangeUJoules(void);
 int64_t get_currentTimeUSec(void);
 char *execute_command(const char *command);
 void print_cpu_info(void);
-void update_cpu_freqs(int *out_avg, int *out_max);
+void update_cpu_freqs(int *out_cur, int *out_max);
 void print_amd_gpu_info(void);
 
 #ifdef NVIDIA_GPU
@@ -464,17 +464,18 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
  * @brief Baca - gabung - simpan statistik frekuensi CPU dalam satu operasi terkunci.
  *
  * File: /tmp/cpu_stats.txt dengan format "KUNCI: angka" per baris
- * (AVG, MAX). MAX adalah frekuensi tertinggi yang pernah tercatat, AVG adalah rata-rata core
- * pada sampling terakhir.
+ * (AVG, MAX, CUR). MAX adalah frekuensi tertinggi yang pernah tercatat (hanya boleh
+ * naik), AVG adalah rata-rata semua core pada sampling terakhir, CUR adalah frekuensi
+ * core tertinggi pada sampling terakhir.
  *
  * Penguncian pakai flock() karena aplikasi ini berjalan sekali jalan (single shot)
  * dan bisa dipanggil bergantian (misalnya poller panel) - tanpa lock, dua penulis
  * bisa saling menimpa sehingga MAX terlihat turun.
  *
- * @param out_avg  Penyimpanan AVG MHz.
- * @param out_max  Penyimpanan MAX gabungan MHz.
+ * @param out_cur  Penyimpanan frekuensi core tertinggi saat ini (CUR) MHz.
+ * @param out_max  Penyimpanan MAX gabungan MHz (riwayat, hanya boleh naik).
  */
-void update_cpu_freqs(int *out_avg, int *out_max)
+void update_cpu_freqs(int *out_cur, int *out_max)
 {
     int cur_avg = -1, cur_max = -1;
 
@@ -485,7 +486,7 @@ void update_cpu_freqs(int *out_avg, int *out_max)
     if (lock_fd < 0)
     {
         /* Tidak bisa membuka file: tampilkan hasil sampling saja. */
-        *out_avg = cur_avg;
+        *out_cur = cur_max;
         *out_max = cur_max;
 
         return;
@@ -494,7 +495,7 @@ void update_cpu_freqs(int *out_avg, int *out_max)
     flock(lock_fd, LOCK_EX);
 
     /* Baca ulang DI DALAM lock supaya nilai yang digabung benar-benar terakhir. */
-    int old_avg = -1, old_max = -1;
+    int old_avg = -1, old_max = -1, old_cur = -1;
     char line[64];
     char key[16];
     int value;
@@ -513,6 +514,8 @@ void update_cpu_freqs(int *out_avg, int *out_max)
                     old_avg = value;
                 else if (strcmp(key, "MAX") == 0)
                     old_max = value;
+                else if (strcmp(key, "CUR") == 0)
+                    old_cur = value;
             }
         }
 
@@ -529,10 +532,13 @@ void update_cpu_freqs(int *out_avg, int *out_max)
 
     int avg_mhz = cur_avg >= 0 ? cur_avg : old_avg;
 
-    /* Hanya tulis kalau ada yang berubah: MAX baru lebih tinggi, atau AVG berubah.
+    /* CUR: frekuensi core tertinggi pada sampel terakhir, tanpa riwayat. */
+    int cur_mhz = cur_max >= 0 ? cur_max : old_cur;
+
+    /* Hanya tulis kalau ada yang berubah: MAX baru lebih tinggi, atau AVG/CUR berubah.
      * Nilai lama tidak pernah ditimpa oleh angka yang
      * lebih buruk. Tulis lewat file sementara unik lalu rename (atomic). */
-    int changed = (max_mhz != old_max) || (avg_mhz != old_avg);
+    int changed = (max_mhz != old_max) || (avg_mhz != old_avg) || (cur_mhz != old_cur);
 
     if (changed && max_mhz >= 0)
     {
@@ -547,6 +553,7 @@ void update_cpu_freqs(int *out_avg, int *out_max)
             {
                 fprintf(tf, "AVG: %d\n", avg_mhz);
                 fprintf(tf, "MAX: %d\n", max_mhz);
+                fprintf(tf, "CUR: %d\n", cur_mhz);
                 fclose(tf);
                 rename(tmp_path, CPU_STATS_PATH);
             }
@@ -563,7 +570,7 @@ void update_cpu_freqs(int *out_avg, int *out_max)
     if (!f)
         close(lock_fd);
 
-    *out_avg = avg_mhz;
+    *out_cur = cur_mhz;
     *out_max = max_mhz;
 }
 
@@ -670,7 +677,7 @@ void print_cpu_info(void)
         cpu_usage = 100.0f * (float)(total_diff - idle_diff) / (float)total_diff;
 
     float used_memory_gb = get_memory_usage();
-    int freq_avg = -1, freq_max = -1;
+    int freq_cur = -1, freq_max = -1;
     int cpu_temperature1 = -1;
 #ifdef ENABLE_DRAM
     int dram_temperature1 = -1;
@@ -684,7 +691,7 @@ void print_cpu_info(void)
     else if (find_all_hwmon_by_name("coretemp", cpu_hwmon_paths, 1) > 0)
         cpu_temperature1 = read_hwmon_temp(cpu_hwmon_paths[0], "temp1_input");
 
-    update_cpu_freqs(&freq_avg, &freq_max);
+    update_cpu_freqs(&freq_cur, &freq_max);
 
 #ifdef ENABLE_DRAM
     int num_dram_sensors = find_all_hwmon_by_name("spd5118", dram_paths, 2);
@@ -705,7 +712,7 @@ void print_cpu_info(void)
                " %d °C |  %d °C | "
 #endif
                "󰚥 %.0f W\n",
-               cpu_usage, fmt_mhz(favg, sizeof(favg), freq_avg),
+               cpu_usage, fmt_mhz(favg, sizeof(favg), freq_cur),
                fmt_mhz(fmax, sizeof(fmax), freq_max), used_memory_gb,
                cpu_temperature1 != -1 ? cpu_temperature1 / 1000 : 0,
 #ifdef ENABLE_DRAM
