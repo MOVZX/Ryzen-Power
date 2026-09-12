@@ -22,33 +22,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/time.h>
-#include <stdint.h>
-#include <glob.h>
-#include <limits.h>
-#include <fcntl.h>
-#include <libgen.h>
 
-#include "fmt_mhz.h"
+#include "sensors_common.h"
 
-#define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
-#define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
-#define BUFFER_SIZE 256
-#define USEC 1000000
+#define MAX_CPU_SENSORS 16
 
 #define BOLD "\033[1m"
 #define RESET "\033[0m"
 #define CLEAR_SCREEN "\033[2J"
 #define CURSOR_HOME "\033[H"
-
-#define MAX_CPU_SENSORS 16
-#define MAX_TEMP_IDX 16
-
-typedef struct
-{
-    char label[32];
-    int value;
-} TempSensor;
 
 typedef struct
 {
@@ -59,322 +41,16 @@ typedef struct
 } FreqStats;
 
 /**
- * @brief Mendapatkan konsumsi energi CPU saat ini dalam mikrojoule.
- *
- * @return int64_t Konsumsi energi dalam mikrojoule, atau -1 jika gagal.
- */
-int64_t get_cpu_consumption_ujoules()
-{
-    int64_t consumption = -1;
-    FILE *file = fopen(RAPL_FILE_PATH, "r");
-
-    if (file == NULL)
-    {
-        perror("Error opening RAPL energy file");
-
-        return -1;
-    }
-
-    if (fscanf(file, "%ld", &consumption) != 1)
-    {
-        perror("Error reading energy consumption");
-
-        consumption = -1;
-    }
-
-    fclose(file);
-
-    return consumption;
-}
-
-/**
- * @brief Mengembalikan waktu saat ini dalam mikrodetik.
- *
- * @return int64_t Waktu saat ini dalam mikrodetik, atau -1 jika gagal.
- */
-int64_t get_current_time_usec()
-{
-    struct timeval tv;
-
-    if (gettimeofday(&tv, NULL) != 0)
-    {
-        perror("Error getting current time");
-
-        return -1;
-    }
-
-    return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
-}
-
-/**
- * @brief Membaca rentang (wrap range) counter energi RAPL dalam mikrojoule.
- *
- * Pada kernel 7.x, energy_uj adalah counter mentah yang ber-wrap setiap
- * max_energy_range_uj, bukan kumulatif. Userspace harus menangani wrap-nya.
- *
- * @return int64_t Rentang counter dalam mikrojoule, atau -1 jika gagal.
- */
-int64_t get_rapl_range_uj()
-{
-    int64_t range = -1;
-    FILE *file = fopen(RAPL_RANGE_PATH, "r");
-
-    if (file == NULL)
-        return -1;
-
-    if (fscanf(file, "%ld", &range) != 1)
-        range = -1;
-
-    fclose(file);
-
-    return range;
-}
-
-/**
- * @brief Membaca counter dua kali (jeda 1 detik) dan menghitung dayanya.
- *
- * Mengoreksi wrap counter dengan max_energy_range_uj.
- *
- * @return float Daya CPU dalam Watt, atau -1.0f jika gagal.
- */
-static float read_power_once()
-{
-    int64_t initial_usage = get_cpu_consumption_ujoules();
-    int64_t initial_time = get_current_time_usec();
-
-    if (initial_usage == -1 || initial_time == -1)
-        return -1.0f;
-
-    sleep(1);
-
-    int64_t final_usage = get_cpu_consumption_ujoules();
-    int64_t final_time = get_current_time_usec();
-
-    if (final_usage == -1 || final_time == -1)
-        return -1.0f;
-
-    if (final_time <= initial_time)
-        return -1.0f;
-
-    int64_t energy_diff_uj = final_usage - initial_usage;
-
-    /* Counter bisa ber-wrap di dalam interval ini; kembalikan rentangnya.
-     * Maksimal satu wrap per detik (rentang ~65 kJ vs energi ~kJ/detik). */
-    if (energy_diff_uj < 0)
-    {
-        int64_t range = get_rapl_range_uj();
-
-        if (range > 0)
-            energy_diff_uj += range;
-    }
-
-    if (energy_diff_uj < 0)
-        return -1.0f;
-
-    return (float)energy_diff_uj / (float)(final_time - initial_time);
-}
-
-/**
- * @brief Menghitung daya CPU rata-rata dalam Watt selama interval 1 detik.
- *
- * Rentang wrap yang dilaporkan kernel bisa sedikit lebih kecil dari titik
- * wrap sebenarnya, sehingga selang 1 detik yang memotong wrap bisa menghasilkan
- * diff negatif palsu. Ukur sekali lagi sebelum menyerah.
- *
- * @return float Daya CPU dalam Watt, atau -1.0f jika gagal.
- */
-float calculate_cpu_power()
-{
-    float power = read_power_once();
-
-    if (power < 0)
-        power = read_power_once();
-
-    if (power < 0)
-        fprintf(stderr, "Failed to measure CPU power (energy counter anomaly)\n");
-
-    return power;
-}
-
-/**
- * @brief Membaca nilai integer dari file yang ditentukan.
- *
- * @param path Path ke file.
- * @return int Nilai integer yang dibaca dari file, atau -1 jika gagal.
- */
-int read_int_from_file(const char *path)
-{
-    int value = -1;
-    FILE *file = fopen(path, "r");
-
-    if (file == NULL)
-        return -1;
-
-    if (fscanf(file, "%d", &value) != 1)
-        value = -1;
-
-    fclose(file);
-
-    return value;
-}
-
-/**
- * @brief Mendapatkan suhu CPU (Tctl, Tccd1, Tccd2, ...) dari k10temp.
- *
- * @param sensors Array untuk menyimpan sensor suhu.
- * @param max_sensors Ukuran maksimum array sensors.
- * @return int Jumlah sensor ditemukan, atau -1 jika gagal.
- */
-int get_cpu_temperatures(TempSensor *sensors, int max_sensors)
-{
-    char hwmon_path[BUFFER_SIZE];
-    char label_path[BUFFER_SIZE];
-    char temp_path[BUFFER_SIZE];
-    char label[32];
-    int found = 0;
-
-    glob_t glob_result;
-
-    if (glob("/sys/class/hwmon/hwmon*/name", 0, NULL, &glob_result) == 0)
-    {
-        for (size_t i = 0; i < glob_result.gl_pathc; i++)
-        {
-            FILE *name_file = fopen(glob_result.gl_pathv[i], "r");
-
-            if (name_file)
-            {
-                char name[32];
-
-                if (fgets(name, sizeof(name), name_file))
-                {
-                    name[strcspn(name, "\n")] = 0;
-
-                    if (strcmp(name, "k10temp") == 0)
-                    {
-                        char *dir = dirname(glob_result.gl_pathv[i]);
-
-                        strncpy(hwmon_path, dir, sizeof(hwmon_path) - 1);
-
-                        hwmon_path[sizeof(hwmon_path) - 1] = '\0';
-                        found = 1;
-                    }
-                }
-
-                fclose(name_file);
-
-                if (found)
-                    break;
-            }
-        }
-    }
-
-    globfree(&glob_result);
-
-    if (!found)
-    {
-        fprintf(stderr, "k10temp sensor module not found!\n");
-
-        return -1;
-    }
-
-    // Baca semua sensor berdasarkan label (indeks bisa bolong,
-    // mis. 9950X3D: temp1=Tctl, temp3=Tccd1, temp4=Tccd2)
-    int count = 0;
-
-    for (int idx = 1; idx <= MAX_TEMP_IDX && count < max_sensors; idx++)
-    {
-        label[0] = '\0';
-
-        snprintf(label_path, sizeof(label_path), "%s/temp%d_label", hwmon_path, idx);
-
-        FILE *label_file = fopen(label_path, "r");
-
-        if (label_file)
-        {
-            if (fgets(label, sizeof(label), label_file))
-                label[strcspn(label, "\n")] = 0;
-
-            fclose(label_file);
-        }
-
-        if (label[0] == '\0')
-            continue;
-
-        snprintf(temp_path, sizeof(temp_path), "%s/temp%d_input", hwmon_path, idx);
-
-        snprintf(sensors[count].label, sizeof(sensors[count].label), "%s", label);
-        sensors[count].value = read_int_from_file(temp_path);
-        count++;
-    }
-
-    if (count == 0)
-    {
-        fprintf(stderr, "Failed to read CPU temperatures.\n");
-
-        return -1;
-    }
-
-    return count;
-}
-
-/**
- * @brief Membaca nama model CPU dari /proc/cpuinfo.
- *
- * @param buffer Buffer untuk menyimpan nama CPU.
- * @param size Ukuran buffer.
- * @return int 0 jika berhasil, -1 jika gagal.
- */
-int get_cpu_name(char *buffer, size_t size)
-{
-    FILE *file = fopen("/proc/cpuinfo", "r");
-
-    if (file == NULL)
-        return -1;
-
-    char line[BUFFER_SIZE];
-    int found = -1;
-
-    while (fgets(line, sizeof(line), file))
-    {
-        if (strncmp(line, "model name", 10) == 0)
-        {
-            char *colon = strchr(line, ':');
-
-            if (colon != NULL)
-            {
-                colon++;
-
-                while (*colon == ' ' || *colon == '\t')
-                    colon++;
-
-                snprintf(buffer, size, "%s", colon);
-
-                found = 0;
-            }
-
-            break;
-        }
-    }
-
-    fclose(file);
-
-    if (found == 0)
-        buffer[strcspn(buffer, "\n")] = 0;
-
-    return found;
-}
-
-/**
  * @brief Mendapatkan frekuensi saat ini untuk setiap inti CPU.
  *
  * @param freqs Array untuk menyimpan frekuensi setiap inti dalam MHz.
  * @param cpu_count Jumlah logik core CPU.
  */
-void get_cpu_frequencies(int *freqs, int cpu_count)
+static void get_cpu_frequencies(int *freqs, int cpu_count)
 {
     for (int i = 0; i < cpu_count; i++)
     {
-        char freq_path[BUFFER_SIZE];
+        char freq_path[PATH_MAX];
 
         snprintf(freq_path, sizeof(freq_path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i);
 
@@ -392,7 +68,7 @@ void get_cpu_frequencies(int *freqs, int cpu_count)
  * @param freqs Array frekuensi inti CPU dalam MHz.
  * @param cpu_count Jumlah logik core CPU.
  */
-void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
+static void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
 {
     for (int i = 0; i < cpu_count; i++)
     {
@@ -401,15 +77,8 @@ void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
         if (freq == 0)
             continue;
 
-        if (stats[i].count == 0)
-        {
+        if (freq > stats[i].max)
             stats[i].max = freq;
-        }
-        else
-        {
-            if (freq > stats[i].max)
-                stats[i].max = freq;
-        }
 
         stats[i].last = freq;
         stats[i].sum += freq;
@@ -427,12 +96,12 @@ void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
  * @param cpu_count Jumlah logik core CPU.
  * @param cpu_name Nama model CPU.
  */
-void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power, const FreqStats *stats, int cpu_count, const char *cpu_name)
+static void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power, const FreqStats *stats, int cpu_count, const char *cpu_name)
 {
     printf(BOLD "%s" RESET "\n\n", cpu_name);
 
     for (int i = 0; i < sensor_count; i++)
-        printf("%-7s : %8d°C\n", sensors[i].label, sensors[i].value != -1 ? sensors[i].value / 1000 : 0);
+        printf("%-7s : %8d°C\n", sensors[i].label, sensors[i].value != -1 ? temp_c_rounded(sensors[i].value) : 0);
 
     if (cpu_power >= 0)
         printf("Power   : %8.2f W\n", cpu_power);
@@ -463,12 +132,13 @@ void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power
  *
  * @return int 0 jika berhasil, 1 jika gagal.
  */
-int main()
+int main(void)
 {
-    char cpu_name[BUFFER_SIZE];
+    char cpu_name[256];
+    char hwmon_path[PATH_MAX] = "";
     TempSensor sensors[MAX_CPU_SENSORS];
 
-    if (get_cpu_name(cpu_name, sizeof(cpu_name)) != 0)
+    if (get_cpu_model_name(cpu_name, sizeof(cpu_name)) != 0)
         snprintf(cpu_name, sizeof(cpu_name), "CPU");
 
     int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
@@ -500,17 +170,48 @@ int main()
 
     while (1)
     {
-        int sensor_count = get_cpu_temperatures(sensors, MAX_CPU_SENSORS);
-
-        if (sensor_count < 0)
+        /* Path k10temp dicari sekali saja. Indeks hwmon bisa berubah setelah
+         * modul dimuat ulang, jadi baca ulang path hanya kalau suhunya gagal. */
+        if (hwmon_path[0] == '\0' && find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) != 0)
         {
+            fprintf(stderr, "k10temp sensor module not found!\n");
+
             free(cpu_freqs);
             free(stats);
 
             return 1;
         }
 
-        float cpu_power = calculate_cpu_power();
+        int sensor_count = read_labelled_temps(hwmon_path, sensors, MAX_CPU_SENSORS);
+
+        if (sensor_count == 0)
+        {
+            hwmon_path[0] = '\0';
+
+            if (find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) != 0)
+            {
+                fprintf(stderr, "k10temp sensor module not found!\n");
+
+                free(cpu_freqs);
+                free(stats);
+
+                return 1;
+            }
+
+            sensor_count = read_labelled_temps(hwmon_path, sensors, MAX_CPU_SENSORS);
+
+            if (sensor_count == 0)
+            {
+                fprintf(stderr, "Failed to read CPU temperatures.\n");
+
+                free(cpu_freqs);
+                free(stats);
+
+                return 1;
+            }
+        }
+
+        float cpu_power = measure_cpu_power();
 
         /* Kegagalan sesaat (mis. wrap counter RAPL) tidak boleh mematikan
          * monitor; tampilkan N/A untuk tick ini dan lanjut. */

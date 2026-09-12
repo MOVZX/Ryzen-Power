@@ -23,31 +23,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <ctype.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <fcntl.h>
-#include <sys/mman.h>
-#include <pci/pci.h>
-#include <glob.h>
 #include <limits.h>
 
 #ifdef NVIDIA_GPU
+#include <sys/mman.h>
+#include <pci/pci.h>
 #include <nvml.h>
 #endif
 
-#include "fmt_mhz.h"
+#include "sensors_common.h"
 
-#define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
-#define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 #define MAX_NAME_LENGTH 300
-#define USEC 1000000
-#define KILO 1000
-#define TO_GB (1024.0 * 1024.0)
 #define VRAM_REGISTER_OFFSET 0x0000E2A8
 #define HOTSPOT_REGISTER_OFFSET 0x0002046c
 #define NVIDIA_VRAM_TEMP_MASK 0x00000fff
@@ -58,8 +49,7 @@
 #define PG_SZ sysconf(_SC_PAGE_SIZE)
 #define MEM_PATH "/dev/mem"
 #define MAX_DEVICES 1
-#define DEBUG 0
-#define BUFFER_SIZE 32
+#define DEBUG_ENV_VAR "RYZEN_POWER_DEBUG"
 #define CPU_STATS_PATH "/tmp/cpu_stats.txt"
 
 /* Suhu DRAM (sensor spd5118) dimatikan secara default.
@@ -68,10 +58,6 @@
  */
 
 float get_memory_usage(void);
-int64_t get_cpuConsumptionUJoules(void);
-int64_t get_raplRangeUJoules(void);
-int64_t get_currentTimeUSec(void);
-char *execute_command(const char *command);
 void print_cpu_info(void);
 void update_cpu_freqs(int *out_cur, int *out_max);
 void print_amd_gpu_info(void);
@@ -80,15 +66,23 @@ void print_amd_gpu_info(void);
 void print_nvidia_gpu_info(void);
 #endif
 
-int detect_gpu_type(void);
-
-enum GpuType
+/**
+ * @brief Cek apakah pesan diagnostik boleh dicetak ke stderr.
+ *
+ * Baris output utama dipakai panel, jadi kegagalan sengaja diam secara default.
+ * Nyalakan dengan RYZEN_POWER_DEBUG=1 pada environment.
+ *
+ * @return bool true kalau variabel RYZEN_POWER_DEBUG terpasang.
+ */
+static bool dbg_enabled(void)
 {
-    GPU_TYPE_UNINITIALIZED = -1,
-    GPU_TYPE_NONE = 0,
-    GPU_TYPE_AMD,
-    GPU_TYPE_NVIDIA,
-};
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = (getenv(DEBUG_ENV_VAR) != NULL) ? 1 : 0;
+
+    return cached == 1;
+}
 
 typedef struct
 {
@@ -110,7 +104,7 @@ float get_memory_usage(void)
 
     if (!file)
     {
-        if (DEBUG)
+        if (dbg_enabled())
             perror("fopen");
 
         return -1.0f;
@@ -134,319 +128,6 @@ float get_memory_usage(void)
         return -1.0f;
 
     return (float)(total_memory - available_memory) / (1024.0f * 1024.0f);
-}
-
-/**
- * @brief Mengambil konsumsi energi CPU dalam microjoule.
- *
- * Fungsi ini membaca file RAPL untuk mendapatkan total energi yang dikonsumsi oleh CPU.
- *
- * @return int64_t Konsumsi energi dalam microjoule, atau -1 jika terjadi kesalahan.
- */
-int64_t get_cpuConsumptionUJoules(void)
-{
-    int64_t consumption;
-    FILE *file = fopen(RAPL_FILE_PATH, "r");
-
-    if (!file || fscanf(file, "%ld", &consumption) != 1)
-    {
-        if (DEBUG)
-            perror("Failed to read energy consumption!");
-
-        if (file)
-            fclose(file);
-
-        return -1;
-    }
-
-    fclose(file);
-
-    return consumption;
-}
-
-/**
- * @brief Membaca rentang (wrap range) counter energi RAPL dalam mikrojoule.
- *
- * Pada kernel 7.x, counter ber-wrap setiap max_energy_range_uj,
- * bukan kumulatif. Userspace harus menangani wrap-nya.
- *
- * @return int64_t Rentang counter dalam mikrojoule, atau -1 jika gagal.
- */
-int64_t get_raplRangeUJoules(void)
-{
-    int64_t range = -1;
-    FILE *file = fopen(RAPL_RANGE_PATH, "r");
-
-    if (!file || fscanf(file, "%ld", &range) != 1)
-    {
-        if (file)
-            fclose(file);
-
-        return -1;
-    }
-
-    fclose(file);
-
-    return range;
-}
-
-/**
- * @brief Mendapatkan waktu saat ini dalam mikrodetik.
- *
- * Fungsi ini menggunakan gettimeofday untuk mengambil waktu sistem saat ini dan
- * mengubahnya menjadi mikrodetik.
- *
- * @return int64_t Waktu saat ini dalam mikrodetik, atau -1 jika terjadi kesalahan.
- */
-int64_t get_currentTimeUSec(void)
-{
-    struct timeval tv;
-
-    if (gettimeofday(&tv, NULL) != 0)
-    {
-        if (DEBUG)
-            perror("Failed to get current time!");
-
-        return -1;
-    }
-
-    return ((int64_t)tv.tv_sec * USEC) + tv.tv_usec;
-}
-
-/**
- * @brief Menjalankan perintah shell dan mengembalikan outputnya.
- *
- * Fungsi ini membuka sebuah proses dengan perintah yang diberikan, membaca baris pertama
- * dari output, dan mengembalikannya sebagai string yang dialokasikan secara dinamis.
- * Pemanggil bertanggung jawab untuk membebaskan memori.
- *
- * @param command Perintah yang akan dijalankan.
- * @return char* Output dari perintah, atau NULL jika terjadi kesalahan.
- */
-char *execute_command(const char *command)
-{
-    FILE *fp = popen(command, "r");
-
-    if (!fp)
-    {
-        if (DEBUG)
-            perror("popen");
-
-        return NULL;
-    }
-
-    char *output = malloc(4096);
-
-    if (!output)
-    {
-        pclose(fp);
-
-        return NULL;
-    }
-
-    if (fgets(output, 4096, fp) == NULL)
-    {
-        free(output);
-
-        output = NULL;
-    }
-    else
-    {
-        output[strcspn(output, "\n")] = 0;
-    }
-
-    pclose(fp);
-
-    return output;
-}
-
-/**
- * @brief Menemukan semua direktori hwmon dengan nama yang cocok.
- *
- * Fungsi ini memindai melalui /sys/class/hwmon untuk menemukan perangkat keras
- * monitor yang cocok dengan nama yang diberikan dan menyimpan path mereka.
- *
- * @param name Nama hwmon yang dicari (misalnya, "k10temp").
- * @param out_paths Array untuk menyimpan path yang ditemukan.
- * @param max_paths Jumlah maksimum path yang akan disimpan.
- * @return int Jumlah path yang ditemukan.
- */
-static int find_all_hwmon_by_name(const char *name, char (*out_paths)[PATH_MAX], int max_paths)
-{
-    glob_t hwmon_paths;
-    int count = 0;
-
-    if (glob("/sys/class/hwmon/hwmon*", 0, NULL, &hwmon_paths) != 0)
-        return 0;
-
-    for (size_t i = 0; i < hwmon_paths.gl_pathc && count < max_paths; i++)
-    {
-        char name_path[PATH_MAX];
-        snprintf(name_path, sizeof(name_path), "%s/name", hwmon_paths.gl_pathv[i]);
-
-        FILE *f = fopen(name_path, "r");
-
-        if (!f)
-            continue;
-
-        char buffer[BUFFER_SIZE];
-
-        if (fgets(buffer, sizeof(buffer), f))
-        {
-            buffer[strcspn(buffer, "\n")] = 0;
-
-            if (strcmp(buffer, name) == 0)
-            {
-                strncpy(out_paths[count], hwmon_paths.gl_pathv[i], PATH_MAX - 1);
-
-                out_paths[count][PATH_MAX - 1] = '\0';
-
-                count++;
-            }
-        }
-
-        fclose(f);
-    }
-
-    globfree(&hwmon_paths);
-
-    return count;
-}
-
-/**
- * @brief Membaca suhu dari file input suhu hwmon.
- *
- * @param hwmon_path Path ke direktori hwmon.
- * @param temp_file Nama file input suhu (misalnya, "temp1_input").
- * @return int Suhu dalam mili-derajat Celsius, atau -1 jika terjadi kesalahan.
- */
-static int read_hwmon_temp(const char *hwmon_path, const char *temp_file)
-{
-    char full_path[PATH_MAX];
-    int ret = snprintf(full_path, sizeof(full_path), "%s/%s", hwmon_path, temp_file);
-
-    if (ret < 0 || (size_t)ret >= sizeof(full_path))
-        return -1;
-
-    FILE *f = fopen(full_path, "r");
-
-    if (!f)
-        return -1;
-
-    int temp;
-
-    if (fscanf(f, "%d", &temp) != 1)
-        temp = -1;
-
-    fclose(f);
-
-    return temp;
-}
-
-/**
- * @brief Hitung kunci urut dari alamat PCI sebuah direktori hwmon.
- *
- * Path hwmon selalu mengandung alamat PCI perangkatnya, misalnya
- * ".../0000:11:00.0/hwmon/hwmon7". Alamat terakhir di path yang dipakai
- * supaya urutan stabil dan tidak bergantung pada urutan glob.
- *
- * @param hwmon_path Path direktori hwmon.
- * @return long long Kunci urut, atau -1 jika tidak ada alamat PCI.
- */
-static long long hwmon_pci_key(const char *hwmon_path)
-{
-    char real[PATH_MAX];
-
-    if (!realpath(hwmon_path, real))
-        return -1;
-
-    long long key = -1;
-
-    for (const char *p = real; *p; p++)
-    {
-        unsigned int dom, bus, dev, func;
-        int n = 0;
-
-        if (sscanf(p, "%4x:%2x:%2x.%1x%n", &dom, &bus, &dev, &func, &n) == 4 && n > 0)
-        {
-            key = ((long long)dom << 32) | ((long long)bus << 16) | ((long long)dev << 8) | func;
-            p += n - 1;
-        }
-    }
-
-    return key;
-}
-
-/**
- * @brief Membaca suhu chipset PCH dari sensor prom21_xhci.
- *
- * Board ini punya dua chip prom21_xhci, di PCI 11:00.0 dan 13:00.0.
- * lm-sensors menamai keduanya "PCH Chipset #1" dan "PCH Chipset #2", tapi
- * label di sysfs kosong. Urutan ditentukan dari alamat PCI: 11:00.0 -> PCH1,
- * 13:00.0 -> PCH2, sama seperti penomoran lm-sensors.
- *
- * @param pch1  Penyimpanan suhu PCH1 (mili-derajat Celsius), -1 jika tidak ada.
- * @param pch2  Penyimpanan suhu PCH2 (mili-derajat Celsius), -1 jika tidak ada.
- */
-static void get_pch_temps(int *pch1, int *pch2)
-{
-    char paths[4][PATH_MAX];
-    char swapped[PATH_MAX];
-    long long keys[4];
-
-    *pch1 = -1;
-    *pch2 = -1;
-
-    int found = find_all_hwmon_by_name("prom21_xhci", paths, 4);
-
-    if (found <= 0)
-        return;
-
-    for (int i = 0; i < found; i++)
-        keys[i] = hwmon_pci_key(paths[i]);
-
-    /* glob mengurutkan nama sebagai string, jadi hwmon10 muncul sebelum
-     * hwmon7. Urutkan ulang berdasarkan alamat PCI. */
-    for (int i = 0; i < found; i++)
-    {
-        for (int j = i + 1; j < found; j++)
-        {
-            if (keys[j] >= keys[i])
-                continue;
-
-            long long tmp_key = keys[i];
-
-            keys[i] = keys[j];
-            keys[j] = tmp_key;
-
-            memcpy(swapped, paths[i], PATH_MAX);
-            memcpy(paths[i], paths[j], PATH_MAX);
-            memcpy(paths[j], swapped, PATH_MAX);
-        }
-    }
-
-    *pch1 = read_hwmon_temp(paths[0], "temp1_input");
-
-    if (found > 1)
-        *pch2 = read_hwmon_temp(paths[1], "temp1_input");
-}
-
-/**
- * @brief Bulatkan suhu mili-derajat Celsius menjadi derajat utuh.
- *
- * Sysfs mengirim suhu dalam mili-derajat, misalnya 70965. Pembagian integer
- * memotong ke bawah sehingga tampil 70, padahal lm-sensors menampilkan 71. Bulatkan
- * ke derajat terdekat supaya keduanya sama.
- *
- * @param milli_c Suhu dalam mili-derajat Celsius.
- * @return int Suhu dalam derajat Celsius, dibulatkan ke terdekat.
- */
-static int temp_c_rounded(int milli_c)
-{
-    if (milli_c < 0)
-        return -((-milli_c + 500) / 1000);
-
-    return (milli_c + 500) / 1000;
 }
 
 /**
@@ -540,7 +221,8 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     get_cpu_freqs(&cur_avg, &cur_max);
 
-    int lock_fd = open(CPU_STATS_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    /* O_NOFOLLOW: jangan ikut symlink yang ditanam pengguna lain di /tmp. */
+    int lock_fd = open(CPU_STATS_PATH, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
 
     if (lock_fd < 0)
     {
@@ -645,7 +327,7 @@ static bool get_cpu_times(CpuTimes *times)
 
     if (!f)
     {
-        if (DEBUG)
+        if (dbg_enabled())
             perror("fopen /proc/stat");
 
         return false;
@@ -683,14 +365,14 @@ static bool get_cpu_times(CpuTimes *times)
  */
 void print_cpu_info(void)
 {
-    int64_t initial_energy_uj = get_cpuConsumptionUJoules();
-    int64_t initial_time_us = get_currentTimeUSec();
+    /* Energi RAPL dan waktu CPU diambil pada jendela satu detik yang sama. */
+    int64_t initial_energy_uj = get_cpu_energy_uj();
+    int64_t initial_time_us = get_time_usec();
     CpuTimes initial_cpu_times;
-    bool initial_times_ok = get_cpu_times(&initial_cpu_times);
 
-    if (initial_energy_uj == -1 || initial_time_us == -1 || !initial_times_ok)
+    if (initial_energy_uj < 0 || initial_time_us < 0 || !get_cpu_times(&initial_cpu_times))
     {
-        if (DEBUG)
+        if (dbg_enabled())
             fprintf(stderr, "Failed to get initial CPU stats.\n");
 
         return;
@@ -698,35 +380,29 @@ void print_cpu_info(void)
 
     sleep(1);
 
-    int64_t final_energy_uj = get_cpuConsumptionUJoules();
-    int64_t final_time_us = get_currentTimeUSec();
+    int64_t final_energy_uj = get_cpu_energy_uj();
+    int64_t final_time_us = get_time_usec();
     CpuTimes final_cpu_times;
-    bool final_times_ok = get_cpu_times(&final_cpu_times);
 
-    if (final_energy_uj == -1 || final_time_us == -1 || !final_times_ok)
+    if (final_energy_uj < 0 || final_time_us < 0 || !get_cpu_times(&final_cpu_times))
     {
-        if (DEBUG)
+        if (dbg_enabled())
             fprintf(stderr, "Failed to get final CPU stats.\n");
 
         return;
     }
 
-    float cpu_power = 0.0f;
-    int64_t energy_delta_uj = final_energy_uj - initial_energy_uj;
-    int64_t time_delta_us = final_time_us - initial_time_us;
+    float cpu_power = cpu_power_from_delta(initial_energy_uj, initial_time_us,
+                                          final_energy_uj, final_time_us);
 
-    /* Counter bisa ber-wrap di dalam interval; kembalikan rentangnya.
-     * Maksimal satu wrap per detik (rentang ~65 kJ vs energi ~kJ/detik). */
-    if (energy_delta_uj < 0)
+    if (cpu_power < 0)
     {
-        int64_t range = get_raplRangeUJoules();
+        /* Kegagalan counter energi tidak boleh menghapus baris output panel. */
+        if (dbg_enabled())
+            fprintf(stderr, "Failed to compute CPU power (energy counter anomaly)\n");
 
-        if (range > 0)
-            energy_delta_uj += range;
+        cpu_power = 0.0f;
     }
-
-    if (energy_delta_uj >= 0 && time_delta_us > 0)
-        cpu_power = (float)energy_delta_uj / (float)time_delta_us;
 
     float cpu_usage = 0.0f;
     unsigned long long total_diff = final_cpu_times.total - initial_cpu_times.total;
@@ -736,6 +412,10 @@ void print_cpu_info(void)
         cpu_usage = 100.0f * (float)(total_diff - idle_diff) / (float)total_diff;
 
     float used_memory_gb = get_memory_usage();
+
+    if (used_memory_gb < 0)
+        used_memory_gb = 0.0f; /* panel tetap menerima satu baris lengkap */
+
     int freq_cur = -1, freq_max = -1;
     int cpu_temperature1 = -1;
     int pch_temperature1 = -1, pch_temperature2 = -1;
@@ -765,7 +445,6 @@ void print_cpu_info(void)
         dram_temperature2 = read_hwmon_temp(dram_paths[1], "temp1_input");
 #endif
 
-    if (used_memory_gb >= 0)
     {
         char favg[24], fmax[24];
 
@@ -861,7 +540,7 @@ void print_nvidia_gpu_info(void)
 
     if (result != NVML_SUCCESS)
     {
-        if (DEBUG)
+        if (dbg_enabled())
             fprintf(stderr, "Failed to initialize NVML: %s\n", nvmlErrorString(result));
 
         return;
@@ -871,7 +550,7 @@ void print_nvidia_gpu_info(void)
 
     if (result != NVML_SUCCESS || device_count == 0)
     {
-        if (DEBUG && result != NVML_SUCCESS)
+        if (result != NVML_SUCCESS && dbg_enabled())
             fprintf(stderr, "Failed to get device count: %s\n", nvmlErrorString(result));
 
         goto cleanup_nvml;
@@ -881,7 +560,7 @@ void print_nvidia_gpu_info(void)
 
     if (!pacc)
     {
-        if (DEBUG)
+        if (dbg_enabled())
             fprintf(stderr, "Failed to allocate pci_access\n");
 
         goto cleanup_nvml;
@@ -1001,58 +680,6 @@ cleanup_nvml:
     nvmlShutdown();
 }
 #endif
-
-/**
- * @brief Mendeteksi jenis GPU yang ada di sistem (AMD, NVIDIA, atau tidak ada).
- *
- * Fungsi ini mencoba mendeteksi GPU AMD menggunakan rocm-smi dan GPU NVIDIA
- * menggunakan nvidia-smi. Hasilnya di-cache untuk panggilan berikutnya.
- *
- * @return int Enum GpuType yang menunjukkan jenis GPU yang terdeteksi.
- */
-int detect_gpu_type(void)
-{
-    static enum GpuType cached_gpu_type = GPU_TYPE_UNINITIALIZED;
-
-    if (cached_gpu_type != GPU_TYPE_UNINITIALIZED)
-        return cached_gpu_type;
-
-    char *amd_check = execute_command("rocm-smi --showid 2>/dev/null | grep -i 'GPU' >/dev/null && echo 'AMD'");
-
-    if (amd_check)
-    {
-        if (strstr(amd_check, "AMD"))
-        {
-            free(amd_check);
-            cached_gpu_type = GPU_TYPE_AMD;
-
-            return GPU_TYPE_AMD;
-        }
-
-        free(amd_check);
-    }
-
-#ifdef NVIDIA_GPU
-    char *nvidia_check = execute_command("nvidia-smi >/dev/null 2>&1 && echo 'NVIDIA'");
-
-    if (nvidia_check)
-    {
-        if (strstr(nvidia_check, "NVIDIA"))
-        {
-            free(nvidia_check);
-            cached_gpu_type = GPU_TYPE_NVIDIA;
-
-            return GPU_TYPE_NVIDIA;
-        }
-
-        free(nvidia_check);
-    }
-#endif
-
-    cached_gpu_type = GPU_TYPE_NONE;
-
-    return GPU_TYPE_NONE;
-}
 
 /**
  * @brief Titik masuk utama program.
