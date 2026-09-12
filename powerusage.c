@@ -1,21 +1,21 @@
 /*
- * powerusage - Utilitas untuk memantau penggunaan daya CPU dan GPU.
+ * powerusage - Tool to monitor CPU and GPU power usage.
  *
- * Hak Cipta (C) 2024 MOVZX
+ * Copyright (C) 2026 MOVZX
  *
- * Program ini adalah perangkat lunak bebas; Anda dapat menyebarluaskannya kembali
- * dan/atau memodifikasinya di bawah ketentuan Lisensi Publik Umum GNU
- * sebagaimana dipublikasikan oleh Free Software Foundation; baik versi 2
- * dari Lisensi, atau (sesuai pilihan Anda) versi yang lebih baru.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Program ini didistribusikan dengan harapan akan bermanfaat,
- * tetapi TANPA JAMINAN APAPUN; bahkan tanpa jaminan tersirat
- * DAGANGAN atau KESESUAIAN UNTUK TUJUAN TERTENTU. Lihat
- * Lisensi Publik Umum GNU untuk lebih jelasnya.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
  *
- * Anda seharusnya telah menerima salinan Lisensi Publik Umum GNU
- * bersama dengan program ini; jika tidak, tulislah ke Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #define _GNU_SOURCE
@@ -52,9 +52,9 @@
 #define DEBUG_ENV_VAR "RYZEN_POWER_DEBUG"
 #define CPU_STATS_PATH "/tmp/cpu_stats.txt"
 
-/* Suhu DRAM (sensor spd5118) dimatikan secara default.
- * Build dengan dukungan DRAM:
- *   gcc -O3 -DENABLE_DRAM ...   atau   ENABLE_DRAM=1 ./build.sh
+/* The DRAM temperature (spd5118 sensor) is off by default.
+ * Build with DRAM support:
+ *   gcc -O3 -DENABLE_DRAM ...   or   ENABLE_DRAM=1 ./build.sh
  */
 
 float get_memory_usage(void);
@@ -67,12 +67,12 @@ void print_nvidia_gpu_info(void);
 #endif
 
 /**
- * @brief Cek apakah pesan diagnostik boleh dicetak ke stderr.
+ * @brief Report whether debug output is enabled.
  *
- * Baris output utama dipakai panel, jadi kegagalan sengaja diam secara default.
- * Nyalakan dengan RYZEN_POWER_DEBUG=1 pada environment.
+ * A panel uses the main output line, so the tool keeps quiet when a read
+ * fails. The variable RYZEN_POWER_DEBUG enables the messages when set to 1.
  *
- * @return bool true kalau variabel RYZEN_POWER_DEBUG terpasang.
+ * @return bool true when the RYZEN_POWER_DEBUG variable is set.
  */
 static bool dbg_enabled(void)
 {
@@ -91,12 +91,13 @@ typedef struct
 } CpuTimes;
 
 /**
- * @brief Menghitung penggunaan memori dalam GB.
+ * @brief Calculate the memory usage in GB.
  *
- * Fungsi ini membaca /proc/meminfo untuk mendapatkan total dan memori yang tersedia,
- * lalu menghitung memori yang digunakan dan mengembalikannya dalam gigabyte.
+ * The function reads /proc/meminfo to get the total memory and the available
+ * memory. It then calculates the used memory and returns that value in
+ * gigabytes.
  *
- * @return float Penggunaan memori dalam GB, atau -1.0f jika terjadi kesalahan.
+ * @return float Memory usage in GB, or -1.0f on error.
  */
 float get_memory_usage(void)
 {
@@ -131,14 +132,15 @@ float get_memory_usage(void)
 }
 
 /**
- * @brief Mengambil frekuensi CPU (MHz) dari seluruh core: rata-rata, maksimum.
+ * @brief Get the CPU frequency in MHz from all cores: average and maximum.
  *
- * Fungsi ini membaca scaling_cur_freq setiap core yang online (jalur "cpu", dengan
- * fallback "platform-cpufreq" untuk kernel 6.10+), lalu menghitung frekuensi
- * terendah, rata-rata (frekuensi saat ini) dan tertinggi di semua core.
+ * The function reads scaling_cur_freq for every online core. The path is
+ * "cpu" in most cases, with a "platform-cpufreq" fallback for kernel 6.10
+ * and newer. The function then calculates the average frequency and the
+ * highest frequency over all cores.
  *
- * @param out_avg  Penyimpanan frekuensi rata-rata MHz (-1 jika tidak ada data).
- * @param out_max  Penyimpanan frekuensi maksimum MHz (-1 jika tidak ada data).
+ * @param out_avg Storage for the average frequency in MHz. -1 when no data exists.
+ * @param out_max Storage for the maximum frequency in MHz. -1 when no data exists.
  */
 static void get_cpu_freqs(int *out_avg, int *out_max)
 {
@@ -149,7 +151,7 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
     {
         int found = 0;
 
-        /* dua possible jalur: "cpu" (umum) dan "platform-cpufreq" (kernel 6.10+) */
+        /* two possible paths: "cpu" (common) and "platform-cpufreq" (kernel 6.10+) */
         for (int attempt = 0; attempt < 2 && !found; attempt++)
         {
             if (attempt == 0)
@@ -172,7 +174,7 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
             fclose(cf);
 
             if (khz <= 0)
-                continue; /* core offline atau tidak ada data */
+                continue; /* core offline or no data */
 
             int mhz = (int)(khz / 1000);
 
@@ -186,7 +188,7 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
 
         if (found == 0)
         {
-            /* core berikutnya belum tentu ada; berhenti kalau direktorinya pun tidak ada */
+            /* the next core does not always exist, so stop when even its directory is missing */
             snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq", cpu);
 
             struct stat st;
@@ -201,19 +203,19 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
 }
 
 /**
- * @brief Baca - gabung - simpan statistik frekuensi CPU dalam satu operasi terkunci.
+ * @brief Read, merge, and store the CPU frequency statistics in one locked operation.
  *
- * File: /tmp/cpu_stats.txt dengan format "KUNCI: angka" per baris
- * (AVG, MAX, CUR). MAX adalah frekuensi tertinggi yang pernah tercatat (hanya boleh
- * naik), AVG adalah rata-rata semua core pada sampling terakhir, CUR adalah frekuensi
- * core tertinggi pada sampling terakhir.
+ * The file is /tmp/cpu_stats.txt with the format "KEY: number" on each line
+ * (AVG, MAX, CUR). MAX is the highest frequency ever recorded and can only
+ * rise. AVG is the average of all cores on the last sample. CUR is the
+ * highest core frequency on the last sample.
  *
- * Penguncian pakai flock() karena aplikasi ini berjalan sekali jalan (single shot)
- * dan bisa dipanggil bergantian (misalnya poller panel) - tanpa lock, dua penulis
- * bisa saling menimpa sehingga MAX terlihat turun.
+ * The code uses flock() because this application runs one time per call and
+ * can run in turn, for example from a panel poller. Without the lock, two
+ * writers can overwrite each other, so MAX can look like a decrease.
  *
- * @param out_cur  Penyimpanan frekuensi core tertinggi saat ini (CUR) MHz.
- * @param out_max  Penyimpanan MAX gabungan MHz (riwayat, hanya boleh naik).
+ * @param out_cur Storage for the highest core frequency now (CUR) in MHz.
+ * @param out_max Storage for the merged MAX value in MHz. This is history and can only rise.
  */
 void update_cpu_freqs(int *out_cur, int *out_max)
 {
@@ -221,12 +223,12 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     get_cpu_freqs(&cur_avg, &cur_max);
 
-    /* O_NOFOLLOW: jangan ikut symlink yang ditanam pengguna lain di /tmp. */
+    /* O_NOFOLLOW: do not follow a symlink that another user planted in /tmp. */
     int lock_fd = open(CPU_STATS_PATH, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
 
     if (lock_fd < 0)
     {
-        /* Tidak bisa membuka file: tampilkan hasil sampling saja. */
+        /* Cannot open the file: show only the sampling result. */
         *out_cur = cur_max;
         *out_max = cur_max;
 
@@ -235,7 +237,7 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     flock(lock_fd, LOCK_EX);
 
-    /* Baca ulang DI DALAM lock supaya nilai yang digabung benar-benar terakhir. */
+    /* Read again INSIDE the lock so the merged values are really the latest. */
     int old_avg = -1, old_max = -1, old_cur = -1;
     char line[64];
     char key[16];
@@ -259,10 +261,9 @@ void update_cpu_freqs(int *out_cur, int *out_max)
                     old_cur = value;
             }
         }
-
     }
 
-    /* MAX: hanya boleh naik. AVG: sampel terbaru. */
+    /* MAX: can only rise. AVG: the newest sample. */
 
     int max_mhz = cur_max;
 
@@ -273,12 +274,12 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     int avg_mhz = cur_avg >= 0 ? cur_avg : old_avg;
 
-    /* CUR: frekuensi core tertinggi pada sampel terakhir, tanpa riwayat. */
+    /* CUR: the highest core frequency on the last sample, with no history. */
     int cur_mhz = cur_max >= 0 ? cur_max : old_cur;
 
-    /* Hanya tulis kalau ada yang berubah: MAX baru lebih tinggi, atau AVG/CUR berubah.
-     * Nilai lama tidak pernah ditimpa oleh angka yang
-     * lebih buruk. Tulis lewat file sementara unik lalu rename (atomic). */
+    /* Write only when something changed: a higher MAX, or a changed AVG/CUR.
+     * An old value never loses to a worse number. Write through a unique
+     * temporary file, then use rename (atomic). */
     int changed = (max_mhz != old_max) || (avg_mhz != old_avg) || (cur_mhz != old_cur);
 
     if (changed && max_mhz >= 0)
@@ -316,10 +317,10 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 }
 
 /**
- * @brief Mengambil waktu CPU total dan idle dari /proc/stat.
+ * @brief Get the total and idle CPU time from /proc/stat.
  *
- * @param times Pointer ke struktur CpuTimes untuk menyimpan hasilnya.
- * @return bool true jika berhasil, false jika gagal.
+ * @param times Pointer to the CpuTimes structure that stores the result.
+ * @return bool true on success, false on error.
  */
 static bool get_cpu_times(CpuTimes *times)
 {
@@ -358,14 +359,14 @@ static bool get_cpu_times(CpuTimes *times)
 }
 
 /**
- * @brief Mencetak informasi penggunaan CPU, suhu, dan penggunaan memori.
+ * @brief Print the CPU usage, temperature, and memory usage information.
  *
- * Fungsi ini mengukur penggunaan daya CPU, penggunaan CPU, dan suhu
- * selama interval satu detik dan mencetaknya ke output standar.
+ * The function measures the CPU power draw, the CPU usage, and the CPU
+ * temperature over a one second interval, then prints them to standard output.
  */
 void print_cpu_info(void)
 {
-    /* Energi RAPL dan waktu CPU diambil pada jendela satu detik yang sama. */
+    /* The RAPL energy and the CPU time come from the same one second window. */
     int64_t initial_energy_uj = get_cpu_energy_uj();
     int64_t initial_time_us = get_time_usec();
     CpuTimes initial_cpu_times;
@@ -393,11 +394,11 @@ void print_cpu_info(void)
     }
 
     float cpu_power = cpu_power_from_delta(initial_energy_uj, initial_time_us,
-                                          final_energy_uj, final_time_us);
+                                           final_energy_uj, final_time_us);
 
     if (cpu_power < 0)
     {
-        /* Kegagalan counter energi tidak boleh menghapus baris output panel. */
+        /* An energy counter error must not remove the output line of the panel. */
         if (dbg_enabled())
             fprintf(stderr, "Failed to compute CPU power (energy counter anomaly)\n");
 
@@ -414,7 +415,7 @@ void print_cpu_info(void)
     float used_memory_gb = get_memory_usage();
 
     if (used_memory_gb < 0)
-        used_memory_gb = 0.0f; /* panel tetap menerima satu baris lengkap */
+        used_memory_gb = 0.0f; /* the panel still receives one complete line */
 
     int freq_cur = -1, freq_max = -1;
     int cpu_temperature1 = -1;
@@ -468,10 +469,9 @@ void print_cpu_info(void)
 }
 
 /**
- * @brief Mencetak informasi penggunaan GPU AMD, suhu, dan penggunaan daya.
+ * @brief Print the AMD GPU usage, temperature, and power information.
  *
- * Fungsi ini menggunakan rocm-smi untuk mengambil dan mencetak berbagai metrik
- * untuk GPU AMD.
+ * The function uses rocm-smi to get and print the metrics for the AMD GPU.
  */
 void print_amd_gpu_info(void)
 {
@@ -526,10 +526,10 @@ void print_amd_gpu_info(void)
 
 #ifdef NVIDIA_GPU
 /**
- * @brief Mencetak informasi penggunaan GPU NVIDIA, suhu, dan penggunaan daya.
+ * @brief Print the NVIDIA GPU usage, temperature, and power information.
  *
- * Fungsi ini menggunakan NVML dan akses PCI langsung untuk mengambil dan mencetak
- * berbagai metrik untuk GPU NVIDIA, termasuk suhu VRAM dan hotspot.
+ * The function uses NVML and direct PCI access to get and print the metrics
+ * for the NVIDIA GPU, including the VRAM and hotspot temperatures.
  */
 void print_nvidia_gpu_info(void)
 {
@@ -589,13 +589,13 @@ void print_nvidia_gpu_info(void)
         if (nvmlDeviceGetUtilizationRates(device, &util) == NVML_SUCCESS)
             gpu_util = util.gpu;
 
-        /* Frekuensi inti GPU saat ini (MHz). */
+        /* Current GPU core frequency (MHz). */
         unsigned int gpu_clock = 0;
 
         if (nvmlDeviceGetClock(device, NVML_CLOCK_GRAPHICS, NVML_CLOCK_ID_CURRENT, &gpu_clock) != NVML_SUCCESS)
             gpu_clock = 0;
 
-        /* Frekuensi VRAM saat ini (MHz). */
+        /* Current VRAM frequency (MHz). */
         unsigned int mem_clock = 0;
 
         if (nvmlDeviceGetClock(device, NVML_CLOCK_MEM, NVML_CLOCK_ID_CURRENT, &mem_clock) != NVML_SUCCESS)
@@ -631,7 +631,7 @@ void print_nvidia_gpu_info(void)
                 continue;
             }
 
-            /* Register suhu VRAM hanya dibaca; tidak perlu akses tulis. */
+            /* The code only reads the VRAM temperature register, so write access is not needed. */
             int nvidia_fd = open(MEM_PATH, O_RDONLY);
 
             if (nvidia_fd < 0)
@@ -682,14 +682,12 @@ cleanup_nvml:
 #endif
 
 /**
- * @brief Titik masuk utama program.
+ * @brief Program entry point.
  *
- * Menganalisis argumen baris perintah untuk menentukan apakah akan menampilkan
- * informasi CPU atau GPU.
+ * The function reads the command line arguments to decide whether to show
+ * the CPU information or the GPU information.
  *
- * @param argc Jumlah argumen baris perintah.
- * @param argv Array argumen baris perintah.
- * @return int 0 jika berhasil, 1 jika terjadi kesalahan.
+ * @return int 0 on success, 1 on error.
  */
 int main(int argc, char *argv[])
 {

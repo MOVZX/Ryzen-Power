@@ -1,21 +1,21 @@
 /*
- * cpuf - Utilitas untuk memantau frekuensi, suhu, dan daya CPU.
+ * cpuf - Tool to monitor CPU frequency, temperature, and power.
  *
- * Hak Cipta (C) 2024 MOVZX
+ * Copyright (C) 2026 MOVZX
  *
- * Program ini adalah perangkat lunak bebas; Anda dapat menyebarluaskannya kembali
- * dan/atau memodifikasinya di bawah ketentuan Lisensi Publik Umum GNU
- * sebagaimana dipublikasikan oleh Free Software Foundation; baik versi 2
- * dari Lisensi, atau (sesuai pilihan Anda) versi yang lebih baru.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Program ini didistribusikan dengan harapan akan bermanfaat,
- * tetapi TANPA JAMINAN APAPUN; bahkan tanpa jaminan tersirat
- * DAGANGAN atau KESESUAIAN UNTUK TUJUAN TERTENTU. Lihat
- * Lisensi Publik Umum GNU untuk lebih jelasnya.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
  *
- * Anda seharusnya telah menerima salinan Lisensi Publik Umum GNU
- * bersama dengan program ini; jika tidak, tulislah ke Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <stdio.h>
@@ -41,10 +41,10 @@ typedef struct
 } FreqStats;
 
 /**
- * @brief Mendapatkan frekuensi saat ini untuk setiap inti CPU.
+ * @brief Read the current frequency of every CPU core.
  *
- * @param freqs Array untuk menyimpan frekuensi setiap inti dalam MHz.
- * @param cpu_count Jumlah logik core CPU.
+ * @param freqs Array that stores the frequency of each core in MHz.
+ * @param cpu_count Number of logical CPU cores.
  */
 static void get_cpu_frequencies(int *freqs, int cpu_count)
 {
@@ -60,13 +60,14 @@ static void get_cpu_frequencies(int *freqs, int cpu_count)
 }
 
 /**
- * @brief Mencatat satu sampel frekuensi ke statistik per-core.
+ * @brief Record one frequency sample in the per-core statistics.
  *
- * Nilai 0 (gagal baca) diabaikan agar tidak merusak max.
+ * The function ignores the value 0. That value means a failed read, and a
+ * failed read must not damage the maximum value.
  *
- * @param stats Array statistik frekuensi per-core.
- * @param freqs Array frekuensi inti CPU dalam MHz.
- * @param cpu_count Jumlah logik core CPU.
+ * @param stats Array of per-core frequency statistics.
+ * @param freqs Array of core frequencies in MHz.
+ * @param cpu_count Number of logical CPU cores.
  */
 static void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
 {
@@ -87,14 +88,14 @@ static void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
 }
 
 /**
- * @brief Mencetak informasi CPU yang diformat.
+ * @brief Print the formatted CPU information.
  *
- * @param sensors Array sensor suhu CPU.
- * @param sensor_count Jumlah sensor suhu CPU.
- * @param cpu_power Daya CPU dalam Watt.
- * @param stats Array statistik frekuensi per-core.
- * @param cpu_count Jumlah logik core CPU.
- * @param cpu_name Nama model CPU.
+ * @param sensors Array of CPU temperature sensors.
+ * @param sensor_count Number of CPU temperature sensors.
+ * @param cpu_power CPU power in watts.
+ * @param stats Array of per-core frequency statistics.
+ * @param cpu_count Number of logical CPU cores.
+ * @param cpu_name CPU model name.
  */
 static void print_cpu_info(const TempSensor *sensors, int sensor_count, float cpu_power, const FreqStats *stats, int cpu_count, const char *cpu_name)
 {
@@ -124,13 +125,13 @@ static void print_cpu_info(const TempSensor *sensors, int sensor_count, float cp
 }
 
 /**
- * @brief Titik masuk utama untuk program.
+ * @brief Program entry point.
  *
- * Menjalankan loop terus: tiap detik membaca suhu, daya, dan
- * frekuensi, lalu mencetak status. Max per-core dihitung
- * sejak program dijalankan. Berhenti dengan Ctrl+C.
+ * The program runs a loop. Each second it reads the temperature, the power,
+ * and the frequencies, then it prints the status. The maximum value per core
+ * counts from the start of the program. Press Ctrl+C to stop.
  *
- * @return int 0 jika berhasil, 1 jika gagal.
+ * @return int 0 on success, 1 on error.
  */
 int main(void)
 {
@@ -170,8 +171,9 @@ int main(void)
 
     while (1)
     {
-        /* Path k10temp dicari sekali saja. Indeks hwmon bisa berubah setelah
-         * modul dimuat ulang, jadi baca ulang path hanya kalau suhunya gagal. */
+        /* The program resolves the k10temp path one time only. The hwmon index
+         * can change after a module reload, so resolve the path again only when
+         * the temperature read fails. */
         if (hwmon_path[0] == '\0' && find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) != 0)
         {
             fprintf(stderr, "k10temp sensor module not found!\n");
@@ -213,8 +215,8 @@ int main(void)
 
         float cpu_power = measure_cpu_power();
 
-        /* Kegagalan sesaat (mis. wrap counter RAPL) tidak boleh mematikan
-         * monitor; tampilkan N/A untuk tick ini dan lanjut. */
+        /* A short error, for example a RAPL counter wrap, must not stop the
+         * monitor. Print N/A for this tick and continue. */
 
         get_cpu_frequencies(cpu_freqs, cpu_count);
         record_sample(stats, cpu_freqs, cpu_count);

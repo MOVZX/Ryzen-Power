@@ -1,21 +1,21 @@
 /*
- * sens - Utilitas untuk memantau sensor perangkat keras.
+ * sens - Tool to monitor hardware sensors.
  *
- * Hak Cipta (C) 2024 MOVZX
+ * Copyright (C) 2026 MOVZX
  *
- * Program ini adalah perangkat lunak bebas; Anda dapat menyebarluaskannya kembali
- * dan/atau memodifikasinya di bawah ketentuan Lisensi Publik Umum GNU
- * sebagaimana dipublikasikan oleh Free Software Foundation; baik versi 2
- * dari Lisensi, atau (sesuai pilihan Anda) versi yang lebih baru.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Program ini didistribusikan dengan harapan akan bermanfaat,
- * tetapi TANPA JAMINAN APAPUN; bahkan tanpa jaminan tersirat
- * DAGANGAN atau KESESUAIAN UNTUK TUJUAN TERTENTU. Lihat
- * Lisensi Publik Umum GNU untuk lebih jelasnya.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
  *
- * Anda seharusnya telah menerima salinan Lisensi Publik Umum GNU
- * bersama dengan program ini; jika tidak, tulislah ke Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <stdio.h>
@@ -49,10 +49,11 @@
 #define RESET "\033[0m"
 
 /**
- * @brief Mencetak informasi sistem (produsen dan produk).
+ * @brief Print the system information (manufacturer and product).
  *
- * Sysfs dibaca lebih dulu karena board_vendor dan board_name punya mode 0444,
- * jadi terbaca tanpa root. dmidecode hanya dipakai kalau sysfs tidak lengkap.
+ * The program reads sysfs first, because board_vendor and board_name have
+ * mode 0444 and a normal user can read them. It uses dmidecode only when
+ * sysfs is not complete.
  */
 static void print_system_info(void)
 {
@@ -93,14 +94,16 @@ static void print_system_info(void)
 }
 
 /**
- * @brief Mencetak suhu motherboard, VRM, chipset, dan kecepatan kipas.
+ * @brief Print the board, VRM, and chipset temperatures and the fan speeds.
  *
- * Channel sensor pada chip super I/O keluarga NCT67xx:
- *   temp1 = SYSTIN  : suhu motherboard (sensor SYS on board)
- *   temp3 = AUXTIN0 : VRM / MOS
- * Channel lain pada board ini nilainya tidak masuk akal (mis. AUXTIN1 17 °C),
- * jadi tidak dipakai. Suhu chipset diambil dari chip prom21_xhci, bukan dari
- * super I/O, karena label PCH_CHIP_TEMP pada nct6799 selalu 0 di AM5.
+ * Sensor channels on the NCT67xx family super I/O chip:
+ *   temp1 = SYSTIN  : motherboard temperature (SYS sensor on the board)
+ *   temp3 = AUXTIN0 : VRM / MOS temperature
+ * The other channels on this board give values that make no sense, for
+ * example AUXTIN1 at 17 degrees Celsius. The program does not use them.
+ * The tool reads the chipset temperature from the prom21_xhci chips. The
+ * PCH_CHIP_TEMP label on the nct6799 is always 0 on AM5, so the super I/O
+ * chip cannot give that value.
  */
 static void print_motherboard_and_fan_info(void)
 {
@@ -115,7 +118,7 @@ static void print_motherboard_and_fan_info(void)
         vrm_temp = read_hwmon_temp(hwmon_path, "temp3_input");
 
         /* fan1 = Radiator, fan2 = Front, fan3 = Rear, fan4 = AIO Pump,
-         * fan6 = Bottom 1, fan7 = Bottom 2 (fan5 kosong) */
+         * fan6 = Bottom 1, fan7 = Bottom 2 (fan5 is empty) */
         radiator_fan = read_hwmon_temp(hwmon_path, "fan1_input");
         front_fan = read_hwmon_temp(hwmon_path, "fan2_input");
         rear_fan = read_hwmon_temp(hwmon_path, "fan3_input");
@@ -146,10 +149,10 @@ static void print_motherboard_and_fan_info(void)
 }
 
 /**
- * @brief Mencetak suhu dan daya CPU.
+ * @brief Print the CPU temperature and power.
  *
- * Nama CPU diambil dari /proc/cpuinfo supaya tidak butuh root. dmidecode hanya
- * dipakai sebagai cadangan.
+ * The program reads the CPU name from /proc/cpuinfo, so this does not need
+ * root. It uses dmidecode only as a fallback.
  */
 static void print_cpu_info(void)
 {
@@ -196,10 +199,11 @@ static void print_cpu_info(void)
 
 #ifdef ENABLE_DRAM
 /**
- * @brief Mencetak model dan suhu DRAM.
+ * @brief Print the DRAM model and temperature.
  *
- * Nomor bagian DIMM hanya ada di tabel SMBIOS, jadi bagian ini yang masih
- * membutuhkan dmidecode (dan root). Suhu dibaca dari sensor spd5118 di sysfs.
+ * The DIMM part number exists only in the SMBIOS tables, so this part still
+ * needs dmidecode and root. The tool reads the temperature from the spd5118
+ * sensor in sysfs.
  */
 static void print_dram_info(void)
 {
@@ -224,19 +228,19 @@ static void print_dram_info(void)
 
 #ifdef NVIDIA_GPU
 /**
- * @brief Membaca suhu dan daya GPU NVIDIA menggunakan nvidia-smi.
+ * @brief Read the NVIDIA GPU temperature and power with nvidia-smi.
  *
- * @param temperature Pointer untuk menyimpan suhu GPU.
- * @param power Pointer untuk menyimpan penarikan daya GPU.
- * @param bus_id Buffer untuk bus_id GPU; boleh NULL.
- * @param bus_id_size Ukuran buffer bus_id.
+ * @param temperature Pointer that stores the GPU temperature.
+ * @param power Pointer that stores the GPU power draw.
+ * @param bus_id Buffer for the bus_id of the GPU. NULL is allowed.
+ * @param bus_id_size Size of the bus_id buffer.
  *
- * @note Tidak efisien karena memanggil `nvidia-smi` melalui `popen`.
+ * @note This call is not efficient, because it runs nvidia-smi with popen.
  */
 static void read_nvidia_gpu_info(float *temperature, float *power, char *bus_id, size_t bus_id_size)
 {
-    /* nounits perlu supaya power.draw tidak membawa " W" di belakang angka;
-     * kalau tidak, field ketiga (pci.bus_id) tidak akan ter-parse. */
+    /* nounits is necessary, because power.draw adds " W" after the number.
+     * Without it, the parser cannot read the third field (pci.bus_id). */
     char command[BUFFER_SIZE] = "nvidia-smi --query-gpu=temperature.gpu,power.draw,pci.bus_id --format=csv,noheader,nounits";
     FILE *fp = popen(command, "r");
 
@@ -266,13 +270,14 @@ static void read_nvidia_gpu_info(float *temperature, float *power, char *bus_id,
 }
 
 /**
- * @brief Mencocokkan bus_id dari nvidia-smi dengan perangkat PCI hasil scan libpci.
+ * @brief Match the bus_id from nvidia-smi with a PCI device from libpci.
  *
- * Format bus_id nvidia-smi: "00000000:01:00.0" (domain:bus:dev.func), heksadesimal.
+ * The bus_id format of nvidia-smi is "00000000:01:00.0" (domain:bus:dev.func)
+ * in hexadecimal.
  *
- * @param bus_id String bus_id; NULL atau kosong berarti tanpa filter.
- * @param dev    Perangkat PCI yang diperiksa.
- * @return bool true kalau cocok (atau kalau bus_id tidak tersedia).
+ * @param bus_id The bus_id string. NULL or empty means no filter.
+ * @param dev The PCI device to examine.
+ * @return bool true when the device matches, or when no bus_id is available.
  */
 static bool nvidia_bus_id_matches(const char *bus_id, struct pci_dev *dev)
 {
@@ -289,7 +294,7 @@ static bool nvidia_bus_id_matches(const char *bus_id, struct pci_dev *dev)
 }
 
 /**
- * @brief Tabel GPU NVIDIA beserta offset register suhu VRAM pada BAR0.
+ * @brief Table of NVIDIA GPUs with the BAR0 offset of the VRAM temperature register.
  */
 static const struct
 {
@@ -297,42 +302,44 @@ static const struct
     uint16_t dev_id;
     const char *name;
 } vram_dev_table[] =
-{
-    { 0x0000E2A8, 0x2684, "RTX 4090" },
-    { 0x0000E2A8, 0x2702, "RTX 4080 Super" },
-    { 0x0000E2A8, 0x2704, "RTX 4080" },
-    { 0x0000E2A8, 0x2705, "RTX 4070 Ti Super" },
-    { 0x0000E2A8, 0x2782, "RTX 4070 Ti" },
-    { 0x0000E2A8, 0x2783, "RTX 4070 Super" },
-    { 0x0000E2A8, 0x2786, "RTX 4070" },
-    { 0x0000E2A8, 0x2860, "RTX 4070 Max-Q / Mobile" },
-    { 0x0000E2A8, 0x2203, "RTX 3090 Ti" },
-    { 0x0000E2A8, 0x2204, "RTX 3090" },
-    { 0x0000E2A8, 0x2208, "RTX 3080 Ti" },
-    { 0x0000E2A8, 0x2206, "RTX 3080" },
-    { 0x0000E2A8, 0x2216, "RTX 3080 LHR" },
-    { 0x0000EE50, 0x2484, "RTX 3070" },
-    { 0x0000EE50, 0x2488, "RTX 3070 LHR" },
-    { 0x0000E2A8, 0x2531, "RTX A2000" },
-    { 0x0000E2A8, 0x2571, "RTX A2000" },
-    { 0x0000E2A8, 0x2232, "RTX A4500" },
-    { 0x0000E2A8, 0x2231, "RTX A5000" },
-    { 0x0000E2A8, 0x26B1, "RTX A6000" },
-    { 0x0000E2A8, 0x27B8, "L4" },
-    { 0x0000E2A8, 0x26B9, "L40S" },
-    { 0x0000E2A8, 0x2236, "A10" },
+    {
+        {0x0000E2A8, 0x2684, "RTX 4090"},
+        {0x0000E2A8, 0x2702, "RTX 4080 Super"},
+        {0x0000E2A8, 0x2704, "RTX 4080"},
+        {0x0000E2A8, 0x2705, "RTX 4070 Ti Super"},
+        {0x0000E2A8, 0x2782, "RTX 4070 Ti"},
+        {0x0000E2A8, 0x2783, "RTX 4070 Super"},
+        {0x0000E2A8, 0x2786, "RTX 4070"},
+        {0x0000E2A8, 0x2860, "RTX 4070 Max-Q / Mobile"},
+        {0x0000E2A8, 0x2203, "RTX 3090 Ti"},
+        {0x0000E2A8, 0x2204, "RTX 3090"},
+        {0x0000E2A8, 0x2208, "RTX 3080 Ti"},
+        {0x0000E2A8, 0x2206, "RTX 3080"},
+        {0x0000E2A8, 0x2216, "RTX 3080 LHR"},
+        {0x0000EE50, 0x2484, "RTX 3070"},
+        {0x0000EE50, 0x2488, "RTX 3070 LHR"},
+        {0x0000E2A8, 0x2531, "RTX A2000"},
+        {0x0000E2A8, 0x2571, "RTX A2000"},
+        {0x0000E2A8, 0x2232, "RTX A4500"},
+        {0x0000E2A8, 0x2231, "RTX A5000"},
+        {0x0000E2A8, 0x26B1, "RTX A6000"},
+        {0x0000E2A8, 0x27B8, "L4"},
+        {0x0000E2A8, 0x26B9, "L40S"},
+        {0x0000E2A8, 0x2236, "A10"},
 };
 
 /**
- * @brief Membaca suhu VRAM GPU NVIDIA dari register BAR0 melalui /dev/mem.
+ * @brief Read the NVIDIA VRAM temperature from the BAR0 register through /dev/mem.
  *
- * Fungsi ini memindai bus PCI untuk menemukan GPU NVIDIA yang kompatibel
- * (tercantum dalam vram_dev_table), memetakan halaman register suhu VRAM
- * pada BAR0 melalui /dev/mem, lalu membaca nilainya dan mengkonversinya
- * ke derajat Celsius: (nilai & 0xFFF) / 32. Memerlukan eksekusi sebagai root.
+ * The function scans the PCI bus to find a compatible NVIDIA GPU, one that
+ * the vram_dev_table lists. It maps the register page of the VRAM temperature
+ * on BAR0 through /dev/mem. It reads the value and converts it to degrees
+ * Celsius: (value & 0xFFF) / 32. This needs root.
  *
- * @param bus_id    bus_id GPU dari nvidia-smi; NULL berarti ambil GPU NVIDIA pertama.
- * @param vram_temp Pointer untuk menyimpan suhu VRAM (°C), -1 jika gagal.
+ * @param bus_id The bus_id of the GPU from nvidia-smi. NULL means the first
+ *               known NVIDIA GPU.
+ * @param vram_temp Pointer that stores the VRAM temperature in degrees
+ *                  Celsius, or -1 on error.
  */
 static void read_nvidia_vram_temp(const char *bus_id, int *vram_temp)
 {
@@ -356,9 +363,9 @@ static void read_nvidia_vram_temp(const char *bus_id, int *vram_temp)
 
     long page_size = sysconf(_SC_PAGE_SIZE);
 
-    /* Lintasan 0: hanya GPU yang cocok dengan bus_id dari nvidia-smi.
-     * Lintasan 1: abaikan bus_id, ambil GPU NVIDIA pertama yang dikenal.
-     * Fallback ini menjaga pembacaan tetap jalan kalau bus_id tidak terbaca. */
+    /* Pass 0: only the GPU that matches the bus_id from nvidia-smi.
+     * Pass 1: ignore the bus_id and take the first known NVIDIA GPU.
+     * This fallback keeps the read working when no bus_id is available. */
     for (int pass = 0; pass < 2 && *vram_temp < 0; pass++)
     {
         for (struct pci_dev *dev = pacc->devices; dev; dev = dev->next)
@@ -413,7 +420,7 @@ static void read_nvidia_vram_temp(const char *bus_id, int *vram_temp)
 #endif
 
 /**
- * @brief Mendeteksi dan mencetak informasi suhu dan daya GPU.
+ * @brief Detect and print the GPU temperature and power information.
  */
 static void print_gpu_info(void)
 {
@@ -447,8 +454,9 @@ static void print_gpu_info(void)
 
         read_nvidia_gpu_info(&gpu_temp_nvidia, &gpu_power_nvidia, nvidia_bus_id, sizeof(nvidia_bus_id));
 
-        /* Cukup suhu yang valid. Daya tidak diminta lagi di sini supaya blok GPU
-         * tetap tampil saat driver melapor 0 W pada idle. */
+        /* A valid temperature is enough here. The code does not ask for a
+         * power value, so the GPU block still shows when the driver reports
+         * 0 W during idle. */
         if (gpu_temp_nvidia > 0)
         {
             char *nvidia_gpu_name = execute_command("nvidia-smi --query-gpu=gpu_name --format=csv,noheader");
@@ -469,7 +477,7 @@ static void print_gpu_info(void)
 }
 
 /**
- * @brief Mencetak suhu SSD NVMe.
+ * @brief Print the NVMe SSD temperature.
  */
 static void print_nvme_info(void)
 {
@@ -493,7 +501,7 @@ static void print_nvme_info(void)
                 {
                     model[strcspn(model, "\n")] = 0;
 
-                    // Buang padding spasi dari sysfs model file
+                    /* Remove the space padding from the sysfs model file */
                     size_t len = strlen(model);
 
                     while (len > 0 && isspace((unsigned char)model[len - 1]))
@@ -531,9 +539,9 @@ static void print_nvme_info(void)
 }
 
 /**
- * @brief Titik masuk utama untuk program pembacaan sensor.
+ * @brief Program entry point for the sensor reader.
  *
- * @return int 0 jika berhasil.
+ * @return int 0 on success.
  */
 int main(void)
 {

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# build.sh - Bangun keempat utilitas Ryzen Power.
+# build.sh - Build the four Ryzen Power tools.
 #
-# Variabel environment yang dimengerti:
-#   CC           kompilator (default: gcc)
-#   ENABLE_DRAM  1/true/yes/on untuk ikut mencetak suhu DRAM (spd5118)
-#   NVIDIA       0/false/off untuk memaksa build tanpa dukungan NVIDIA
-#   CUDA_DIR     direktori CUDA (default: /opt/cuda)
-#   PREFIX       tujuan "install" (default: /usr/local)
+# Environment variables:
+#   CC           Compiler (default: gcc)
+#   ENABLE_DRAM  1/true/yes/on also prints the DRAM (spd5118) temperature
+#   NVIDIA       0/false/off forces a build without NVIDIA support
+#   CUDA_DIR     Directory of the CUDA SDK (default: /opt/cuda)
+#   PREFIX       Target of "install" (default: /usr/local)
 #
-# Contoh:
-#   ./build.sh                      bangun saja
-#   ENABLE_DRAM=1 ./build.sh        bangun dengan suhu DRAM
-#   sudo ./build.sh install         bangun lalu pasang ke $PREFIX/bin
+# Example:
+#   ./build.sh                      Build only
+#   ENABLE_DRAM=1 ./build.sh        Build with the DRAM temperature
+#   sudo ./build.sh install         Build, then install into $PREFIX/bin
 
 set -euo pipefail
 
@@ -34,8 +34,8 @@ STRICT_FLAGS=(
     -Wno-error=deprecated-declarations
 )
 
-# Suhu DRAM (sensor spd5118) mati secara default. Nilai 0/false/off/no berarti
-# tetap mati, jadi ENABLE_DRAM=0 tidak mengaktifkannya.
+# The DRAM temperature (spd5118 sensor) is off by default. Values 0/false/off/no
+# keep it off, so ENABLE_DRAM=0 does not enable it.
 DRAM_FLAGS=()
 case "${ENABLE_DRAM:-0}" in
     1 | true | True | TRUE | yes | Yes | YES | on | On | ON)
@@ -44,7 +44,7 @@ case "${ENABLE_DRAM:-0}" in
         ;;
 esac
 
-# Dukungan NVIDIA aktif kalau SDK ada, kecuali diminta mati lewat NVIDIA=0.
+# NVIDIA support is on when the SDK exists, unless NVIDIA=0 forces it off.
 NVIDIA_FLAGS=()
 NVIDIA_LIBS=()
 USE_NVIDIA=1
@@ -71,7 +71,7 @@ else
     echo -e "\e[33mℹ NVIDIA CUDA SDK not found. Compiling without NVIDIA support. CPU only. 💻\e[0m"
 fi
 
-# build <nama-target> <file-sumber> [library tambahan]
+# build <target-name> <source-file> [extra libraries]
 build()
 {
     local target="$1"
@@ -83,21 +83,21 @@ build()
         -o "$target" "$target.c" -lpci "$@" -lm
 }
 
-# Akses register GPU lewat libpci dan NVML hanya dipakai pada build NVIDIA,
-# jadi build CPU-only tidak butuh library tambahan.
+# GPU register access through libpci and NVML exists only in the NVIDIA build.
+# A CPU-only build therefore needs no extra library.
 build ryzen
 build cpuf
 build sens "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
 build powerusage "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
 
-echo -e "\e[32m✔ Build selesai.\e[0m"
+echo -e "\e[32m✔ Build completed.\e[0m"
 
 case "${1:-}" in
     install)
         install -d "$PREFIX/bin"
         install -m 0755 ryzen cpuf powerusage sens "$PREFIX/bin/"
 
-        echo -e "\e[32m✔ Terpasang ke $PREFIX/bin\e[0m"
+        echo -e "\e[32m✔ Installed to $PREFIX/bin\e[0m"
         ;;
     "")
         ;;

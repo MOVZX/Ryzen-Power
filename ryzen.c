@@ -1,21 +1,21 @@
 /*
- * ryzen - Utilitas untuk memantau konsumsi daya CPU.
+ * ryzen - Tool to monitor CPU power consumption.
  *
- * Hak Cipta (C) 2024 MOVZX
+ * Copyright (C) 2026 MOVZX
  *
- * Program ini adalah perangkat lunak bebas; Anda dapat menyebarluaskannya kembali
- * dan/atau memodifikasinya di bawah ketentuan Lisensi Publik Umum GNU
- * sebagaimana dipublikasikan oleh Free Software Foundation; baik versi 2
- * dari Lisensi, atau (sesuai pilihan Anda) versi yang lebih baru.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Program ini didistribusikan dengan harapan akan bermanfaat,
- * tetapi TANPA JAMINAN APAPUN; bahkan tanpa jaminan tersirat
- * DAGANGAN atau KESESUAIAN UNTUK TUJUAN TERTENTU. Lihat
- * Lisensi Publik Umum GNU untuk lebih jelasnya.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
  *
- * Anda seharusnya telah menerima salinan Lisensi Publik Umum GNU
- * bersama dengan program ini; jika tidak, tulislah ke Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <stdio.h>
@@ -23,13 +23,12 @@
 #include "sensors_common.h"
 
 /**
- * @brief Titik masuk utama program.
+ * @brief Program entry point.
  *
- * Mengukur konsumsi daya CPU selama satu detik, lalu mencetaknya dalam Watt.
- * Wrap counter RAPL dan pengukuran ulang ditangani sensors_common.h, sama
- * seperti yang dilakukan cpuf dan sens.
+ * The program measures the CPU power for one second, then prints the result
+ * in watts. The file sensors_common.h handles the RAPL counter wrap and the retry.
  *
- * @return int 0 jika berhasil, 1 jika terjadi kesalahan.
+ * @return int 0 on success, 1 on error.
  */
 int main(void)
 {
