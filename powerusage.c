@@ -309,7 +309,9 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     flock(lock_fd, LOCK_UN);
 
-    if (!f)
+    if (f != NULL)
+        fclose(f);
+    else
         close(lock_fd);
 
     *out_cur = cur_mhz;
