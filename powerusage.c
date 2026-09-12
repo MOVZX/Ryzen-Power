@@ -344,6 +344,112 @@ static int read_hwmon_temp(const char *hwmon_path, const char *temp_file)
 }
 
 /**
+ * @brief Hitung kunci urut dari alamat PCI sebuah direktori hwmon.
+ *
+ * Path hwmon selalu mengandung alamat PCI perangkatnya, misalnya
+ * ".../0000:11:00.0/hwmon/hwmon7". Alamat terakhir di path yang dipakai
+ * supaya urutan stabil dan tidak bergantung pada urutan glob.
+ *
+ * @param hwmon_path Path direktori hwmon.
+ * @return long long Kunci urut, atau -1 jika tidak ada alamat PCI.
+ */
+static long long hwmon_pci_key(const char *hwmon_path)
+{
+    char real[PATH_MAX];
+
+    if (!realpath(hwmon_path, real))
+        return -1;
+
+    long long key = -1;
+
+    for (const char *p = real; *p; p++)
+    {
+        unsigned int dom, bus, dev, func;
+        int n = 0;
+
+        if (sscanf(p, "%4x:%2x:%2x.%1x%n", &dom, &bus, &dev, &func, &n) == 4 && n > 0)
+        {
+            key = ((long long)dom << 32) | ((long long)bus << 16) | ((long long)dev << 8) | func;
+            p += n - 1;
+        }
+    }
+
+    return key;
+}
+
+/**
+ * @brief Membaca suhu chipset PCH dari sensor prom21_xhci.
+ *
+ * Board ini punya dua chip prom21_xhci, di PCI 11:00.0 dan 13:00.0.
+ * lm-sensors menamai keduanya "PCH Chipset #1" dan "PCH Chipset #2", tapi
+ * label di sysfs kosong. Urutan ditentukan dari alamat PCI: 11:00.0 -> PCH1,
+ * 13:00.0 -> PCH2, sama seperti penomoran lm-sensors.
+ *
+ * @param pch1  Penyimpanan suhu PCH1 (mili-derajat Celsius), -1 jika tidak ada.
+ * @param pch2  Penyimpanan suhu PCH2 (mili-derajat Celsius), -1 jika tidak ada.
+ */
+static void get_pch_temps(int *pch1, int *pch2)
+{
+    char paths[4][PATH_MAX];
+    char swapped[PATH_MAX];
+    long long keys[4];
+
+    *pch1 = -1;
+    *pch2 = -1;
+
+    int found = find_all_hwmon_by_name("prom21_xhci", paths, 4);
+
+    if (found <= 0)
+        return;
+
+    for (int i = 0; i < found; i++)
+        keys[i] = hwmon_pci_key(paths[i]);
+
+    /* glob mengurutkan nama sebagai string, jadi hwmon10 muncul sebelum
+     * hwmon7. Urutkan ulang berdasarkan alamat PCI. */
+    for (int i = 0; i < found; i++)
+    {
+        for (int j = i + 1; j < found; j++)
+        {
+            if (keys[j] >= keys[i])
+                continue;
+
+            long long tmp_key = keys[i];
+
+            keys[i] = keys[j];
+            keys[j] = tmp_key;
+
+            memcpy(swapped, paths[i], PATH_MAX);
+            memcpy(paths[i], paths[j], PATH_MAX);
+            memcpy(paths[j], swapped, PATH_MAX);
+        }
+    }
+
+    *pch1 = read_hwmon_temp(paths[0], "temp1_input");
+
+    if (found > 1)
+        *pch2 = read_hwmon_temp(paths[1], "temp1_input");
+}
+
+/**
+ * @brief Bulatkan suhu mili-derajat Celsius menjadi derajat utuh.
+ *
+ * Sysfs mengirim suhu dalam mili-derajat, misalnya 70965. Pembagian integer
+ * memotong ke bawah sehingga tampil 70, padahal lm-sensors menampilkan 71. Bulatkan
+ * ke derajat terdekat supaya keduanya sama.
+ *
+ * @param milli_c Suhu dalam mili-derajat Celsius.
+ * @return int Suhu dalam derajat Celsius, dibulatkan ke terdekat.
+ */
+static int temp_c_rounded(int milli_c)
+{
+    if (milli_c < 0)
+        return -((-milli_c + 500) / 1000);
+
+    return (milli_c + 500) / 1000;
+}
+
+/**
  * @brief Mengambil frekuensi CPU (MHz) dari seluruh core: rata-rata, maksimum.
  *
  * Fungsi ini membaca scaling_cur_freq setiap core yang online (jalur "cpu", dengan
@@ -632,6 +738,7 @@ void print_cpu_info(void)
     float used_memory_gb = get_memory_usage();
     int freq_cur = -1, freq_max = -1;
     int cpu_temperature1 = -1;
+    int pch_temperature1 = -1, pch_temperature2 = -1;
 #ifdef ENABLE_DRAM
     int dram_temperature1 = -1;
     int dram_temperature2 = -1;
@@ -643,6 +750,8 @@ void print_cpu_info(void)
         cpu_temperature1 = read_hwmon_temp(cpu_hwmon_paths[0], "temp1_input");
     else if (find_all_hwmon_by_name("coretemp", cpu_hwmon_paths, 1) > 0)
         cpu_temperature1 = read_hwmon_temp(cpu_hwmon_paths[0], "temp1_input");
+
+    get_pch_temps(&pch_temperature1, &pch_temperature2);
 
     update_cpu_freqs(&freq_cur, &freq_max);
 
@@ -661,16 +770,19 @@ void print_cpu_info(void)
         char favg[24], fmax[24];
 
         printf("󰻠 %.0f %% | 󰾾 %s | 󰾾 %s |  %.1f GB |  %d °C | "
+               " %d °C |  %d °C | "
 #ifdef ENABLE_DRAM
                " %d °C |  %d °C | "
 #endif
                "󰚥 %.0f W\n",
                cpu_usage, fmt_mhz(favg, sizeof(favg), freq_cur),
                fmt_mhz(fmax, sizeof(fmax), freq_max), used_memory_gb,
-               cpu_temperature1 != -1 ? cpu_temperature1 / 1000 : 0,
+               cpu_temperature1 != -1 ? temp_c_rounded(cpu_temperature1) : 0,
+               pch_temperature1 != -1 ? temp_c_rounded(pch_temperature1) : 0,
+               pch_temperature2 != -1 ? temp_c_rounded(pch_temperature2) : 0,
 #ifdef ENABLE_DRAM
-               dram_temperature1 != -1 ? dram_temperature1 / 1000 : 0,
-               dram_temperature2 != -1 ? dram_temperature2 / 1000 : 0,
+               dram_temperature1 != -1 ? temp_c_rounded(dram_temperature1) : 0,
+               dram_temperature2 != -1 ? temp_c_rounded(dram_temperature2) : 0,
 #endif
                cpu_power);
     }

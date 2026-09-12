@@ -91,10 +91,10 @@ powerusage gpu
 ```
 
 `powerusage cpu` prints CPU usage, current core frequency, peak recorded frequency,
-used memory, CPU temperature, and power:
+used memory, CPU temperature, the two PCH chipset temperatures, and power:
 
 ```
- 1 % |  4.371 MHz |  5.745 MHz |  4.7 GB |  60 °C |  41 W
+󰻠 8 % | 󰾾 5.523 MHz | 󰾾 5.745 MHz |  37.2 GB |  67 °C |  70 °C |  70 °C | 󰚥 84 W
 ```
 
 `powerusage gpu` detects the GPU vendor and prints utilization, core clock, memory
@@ -140,6 +140,14 @@ The report covers:
   there. `MAX` only ratchets upward, so the peak survives between runs. The file is
   locked with `flock()` because panel pollers and manual runs share it. Delete the file
   to reset the peak.
+- **PCH chipset sensors.** `powerusage cpu` reads both `prom21_xhci` chips and prints
+  them right after the CPU temperature. Their sysfs labels are empty, so the order comes
+  from the PCI address: the first PCH field is `11:00.0`, the second is `13:00.0`. That
+  matches the "PCH Chipset #1" and "PCH Chipset #2" names that `sensors` shows. A missing
+  chip prints 0.
+- **Temperature rounding.** `powerusage cpu` rounds temperatures to the nearest degree,
+  so `70965` millidegrees shows as `71`. That matches `sensors`. Integer division would
+  show `70` instead.
 - **Board sensors.** Motherboard, VRM and chipset readings are compiled but not printed.
   The label to channel mapping is not confirmed on every board.
 - **Fan and chip selection.** `sens` matches super I/O chips by the `nct6` name prefix
