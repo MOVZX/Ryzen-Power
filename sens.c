@@ -31,15 +31,15 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <limits.h>
-#include <unistd.h>
-#include <dirent.h>
 
 #ifdef NVIDIA_GPU
+#include <stdbool.h>
 #include <sys/mman.h>
 #include <pci/pci.h>
 #endif
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
+#define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 #define BUFFER_SIZE 255
 #define USEC 1000000
 #define KILO 1000
@@ -160,11 +160,37 @@ int64_t get_currentTimeUSec()
 }
 
 /**
- * @brief Menghitung daya CPU rata-rata dalam Watt selama interval 1 detik.
+ * @brief Membaca rentang (wrap range) counter energi RAPL dalam mikrojoule.
  *
- * @return float Daya CPU dalam Watt, atau 0.0f jika gagal.
+ * Pada kernel 7.x, counter ber-wrap setiap max_energy_range_uj,
+ * bukan kumulatif. Userspace harus menangani wrap-nya.
+ *
+ * @return int64_t Rentang counter dalam mikrojoule, atau -1 jika gagal.
  */
-float calculate_cpu_power()
+int64_t get_rapl_range_uj()
+{
+    int64_t range = -1;
+    FILE *file = fopen(RAPL_RANGE_PATH, "r");
+
+    if (file == NULL)
+        return -1;
+
+    if (fscanf(file, "%ld", &range) != 1)
+        range = -1;
+
+    fclose(file);
+
+    return range;
+}
+
+/**
+ * @brief Membaca counter dua kali (jeda 1 detik) dan menghitung dayanya.
+ *
+ * Mengoreksi wrap counter dengan max_energy_range_uj.
+ *
+ * @return float Daya CPU dalam Watt, atau -1.0f jika gagal.
+ */
+static float read_cpu_power_once()
 {
     int64_t initial_energy_uj = get_cpuConsumptionUJoules();
     int64_t initial_time_us = get_currentTimeUSec();
@@ -173,7 +199,7 @@ float calculate_cpu_power()
     {
         fprintf(stderr, "Failed to read initial CPU consumption or time data\n");
 
-        return 0.0f;
+        return -1.0f;
     }
 
     usleep(USEC);
@@ -185,20 +211,55 @@ float calculate_cpu_power()
     {
         fprintf(stderr, "Failed to read final CPU consumption or time data\n");
 
-        return 0.0f;
+        return -1.0f;
     }
 
     int64_t energy_delta_uj = final_energy_uj - initial_energy_uj;
     int64_t time_delta_us = final_time_us - initial_time_us;
 
-    if (time_delta_us <= 0 || energy_delta_uj < 0)
+    if (time_delta_us <= 0)
     {
-        fprintf(stderr, "Invalid time or energy difference (time: %ld us, energy: %ld uJ)\n", time_delta_us, energy_delta_uj);
+        fprintf(stderr, "Invalid time difference (%ld us)\n", time_delta_us);
 
-        return 0.0f;
+        return -1.0f;
     }
 
+    /* Counter bisa ber-wrap di dalam interval; kembalikan rentangnya.
+     * Maksimal satu wrap per detik (rentang ~65 kJ vs energi ~kJ/detik). */
+    if (energy_delta_uj < 0)
+    {
+        int64_t range = get_rapl_range_uj();
+
+        if (range > 0)
+            energy_delta_uj += range;
+    }
+
+    if (energy_delta_uj < 0)
+        return -1.0f;
+
     return (float)energy_delta_uj / (float)time_delta_us;
+}
+
+/**
+ * @brief Menghitung daya CPU rata-rata dalam Watt selama interval 1 detik.
+ *
+ * Rentang wrap yang dilaporkan kernel bisa sedikit lebih kecil dari titik
+ * wrap sebenarnya, sehingga selang 1 detik yang memotong wrap bisa menghasilkan
+ * diff negatif palsu. Ukur sekali lagi sebelum menyerah.
+ *
+ * @return float Daya CPU dalam Watt, atau -1.0f jika gagal.
+ */
+float calculate_cpu_power()
+{
+    float power = read_cpu_power_once();
+
+    if (power < 0)
+        power = read_cpu_power_once();
+
+    if (power < 0)
+        fprintf(stderr, "Failed to measure CPU power (energy counter anomaly)\n");
+
+    return power;
 }
 
 /**
@@ -349,17 +410,31 @@ static enum GpuType detect_gpu_type(void)
  * @note Fungsi ini tidak efisien karena memanggil `nvidia-smi` melalui `popen`.
  *       Untuk penggunaan produksi, pustaka NVML direkomendasikan.
  */
-void read_nvidia_gpu_info(float *temperature, float *power)
+void read_nvidia_gpu_info(float *temperature, float *power, char *bus_id, size_t bus_id_size)
 {
-    char command[BUFFER_SIZE] = "nvidia-smi --query-gpu=temperature.gpu,power.draw --format=csv,noheader";
+    /* nounits perlu supaya power.draw tidak membawa " W" di belakang angka;
+     * kalau tidak, field ketiga (pci.bus_id) tidak akan ter-parse. */
+    char command[BUFFER_SIZE] = "nvidia-smi --query-gpu=temperature.gpu,power.draw,pci.bus_id --format=csv,noheader,nounits";
     FILE *fp = popen(command, "r");
+
+    if (bus_id != NULL && bus_id_size > 0)
+        bus_id[0] = '\0';
 
     if (fp)
     {
         char line[BUFFER_SIZE];
 
         if (fgets(line, sizeof(line), fp))
-            sscanf(line, "%f, %f", temperature, power);
+        {
+            char parsed_id[32] = "";
+            int fields = sscanf(line, "%f, %f, %31s", temperature, power, parsed_id);
+
+            if (fields >= 2 && bus_id != NULL && bus_id_size > 0 && parsed_id[0] != '\0')
+            {
+                strncpy(bus_id, parsed_id, bus_id_size - 1);
+                bus_id[bus_id_size - 1] = '\0';
+            }
+        }
 
         pclose(fp);
     }
@@ -368,6 +443,29 @@ void read_nvidia_gpu_info(float *temperature, float *power)
         *temperature = -1;
         *power = -1;
     }
+}
+
+/**
+ * @brief Mencocokkan bus_id dari nvidia-smi dengan perangkat PCI hasil scan libpci.
+ *
+ * Format bus_id nvidia-smi: "00000000:01:00.0" (domain:bus:dev.func), heksadesimal.
+ *
+ * @param bus_id String bus_id; NULL atau kosong berarti tanpa filter.
+ * @param dev    Perangkat PCI yang diperiksa.
+ * @return bool true kalau cocok (atau kalau bus_id tidak tersedia).
+ */
+static bool nvidia_bus_id_matches(const char *bus_id, struct pci_dev *dev)
+{
+    unsigned int domain, bus, devnum, func;
+
+    if (bus_id == NULL || bus_id[0] == '\0')
+        return true;
+
+    if (sscanf(bus_id, "%x:%x:%x.%x", &domain, &bus, &devnum, &func) != 4)
+        return true;
+
+    return dev->domain == (int)domain && dev->bus == (int)bus &&
+           dev->dev == (int)devnum && dev->func == (int)func;
 }
 
 /**
@@ -417,9 +515,10 @@ static const struct
  * ke derajat Celsius: (nilai & 0xFFF) / 32. Memerlukan eksekusi sebagai
  * root.
  *
+ * @param bus_id    bus_id GPU dari nvidia-smi; NULL berarti ambil GPU NVIDIA pertama.
  * @param vram_temp Pointer untuk menyimpan suhu VRAM (°C), -1 jika gagal.
  */
-static void read_nvidia_vram_temp(int *vram_temp)
+static void read_nvidia_vram_temp(const char *bus_id, int *vram_temp)
 {
     *vram_temp = -1;
 
@@ -441,45 +540,55 @@ static void read_nvidia_vram_temp(int *vram_temp)
 
     long page_size = sysconf(_SC_PAGE_SIZE);
 
-    for (struct pci_dev *dev = pacc->devices; dev; dev = dev->next)
+    /* Lintasan 0: hanya GPU yang cocok dengan bus_id dari nvidia-smi.
+     * Lintasan 1: abaikan bus_id, ambil GPU NVIDIA pertama yang dikenal.
+     * Fallback ini menjaga pembacaan tetap jalan kalau bus_id tidak terbaca. */
+    for (int pass = 0; pass < 2 && *vram_temp < 0; pass++)
     {
-        pci_fill_info(dev, PCI_FILL_IDENT | PCI_FILL_BASES);
-
-        if (dev->vendor_id != NVIDIA_VENDOR_ID)
-            continue;
-
-        uint32_t reg_offset = 0;
-        bool compatible = false;
-
-        for (size_t i = 0; i < sizeof(vram_dev_table) / sizeof(vram_dev_table[0]); i++)
+        for (struct pci_dev *dev = pacc->devices; dev; dev = dev->next)
         {
-            if (dev->device_id == vram_dev_table[i].dev_id)
+            pci_fill_info(dev, PCI_FILL_IDENT | PCI_FILL_BASES);
+
+            if (dev->vendor_id != NVIDIA_VENDOR_ID)
+                continue;
+
+            uint32_t reg_offset = 0;
+            bool compatible = false;
+
+            for (size_t i = 0; i < sizeof(vram_dev_table) / sizeof(vram_dev_table[0]); i++)
             {
-                reg_offset = vram_dev_table[i].offset;
-                compatible = true;
+                if (dev->device_id == vram_dev_table[i].dev_id)
+                {
+                    reg_offset = vram_dev_table[i].offset;
+                    compatible = true;
 
-                break;
+                    break;
+                }
             }
+
+            if (!compatible)
+                continue;
+
+            if (pass == 0 && !nvidia_bus_id_matches(bus_id, dev))
+                continue;
+
+            uint32_t vram_addr = (dev->base_addr[0] & 0xFFFFFFFFu) + reg_offset;
+            uint32_t page_off = vram_addr & (uint32_t)(page_size - 1);
+            uint32_t page_base = vram_addr - page_off;
+
+            void *vram_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd, (off_t)page_base);
+
+            if (vram_base != MAP_FAILED)
+            {
+                uint32_t *vram_reg = (uint32_t *)((char *)vram_base + page_off);
+                *vram_temp = (int)((*vram_reg & NVIDIA_VRAM_TEMP_MASK) / NVIDIA_VRAM_TEMP_DIVISOR);
+
+                munmap(vram_base, page_size);
+            }
+
+            if (*vram_temp >= 0)
+                break;
         }
-
-        if (!compatible)
-            continue;
-
-        uint32_t vram_addr = (dev->base_addr[0] & 0xFFFFFFFFu) + reg_offset;
-        uint32_t page_off = vram_addr & (uint32_t)(page_size - 1);
-        uint32_t page_base = vram_addr - page_off;
-
-        void *vram_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd, (off_t)page_base);
-
-        if (vram_base != MAP_FAILED)
-        {
-            uint32_t *vram_reg = (uint32_t *)((char *)vram_base + page_off);
-            *vram_temp = (int)((*vram_reg & NVIDIA_VRAM_TEMP_MASK) / NVIDIA_VRAM_TEMP_DIVISOR);
-
-            munmap(vram_base, page_size);
-        }
-
-        break;
     }
 
     close(fd);
@@ -634,7 +743,7 @@ static void print_cpu_info(void)
     char hwmon_path[PATH_MAX];
     TempSensor sensors[MAX_CPU_SENSORS];
     int sensor_count = 0;
-    float cpu_power = 0.0f;
+    float cpu_power = -1.0f;
 
     if (find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) == 0)
     {
@@ -653,12 +762,17 @@ static void print_cpu_info(void)
     for (int i = 0; i < sensor_count; i++)
         printf("%-8s : %.2f°C\n", sensors[i].label, sensors[i].value != -1 ? sensors[i].value / 1000.0 : 0.0);
 
-    printf("Power    : %.2f W\n", cpu_power);
+    if (cpu_power >= 0)
+        printf("Power    : %.2f W\n", cpu_power);
+    else
+        printf("Power    : N/A\n");
+
     printf("\n");
 
     free(processor_name);
 }
 
+#ifdef ENABLE_DRAM
 /**
  * @brief Mencetak suhu DRAM.
  */
@@ -706,6 +820,7 @@ static void print_dram_info(void)
 
     free(dram_model);
 }
+#endif /* ENABLE_DRAM */
 
 /**
  * @brief Mendeteksi dan mencetak informasi suhu dan daya GPU.
@@ -749,15 +864,16 @@ static void print_gpu_info(void)
     else if (gpu_type == GPU_TYPE_NVIDIA)
     {
         float gpu_temp_nvidia = -1.0f, gpu_power_nvidia = -1.0f;
+        char nvidia_bus_id[32] = "";
 
-        read_nvidia_gpu_info(&gpu_temp_nvidia, &gpu_power_nvidia);
+        read_nvidia_gpu_info(&gpu_temp_nvidia, &gpu_power_nvidia, nvidia_bus_id, sizeof(nvidia_bus_id));
 
         if (gpu_temp_nvidia > 0 && gpu_power_nvidia > 0)
         {
             char *nvidia_gpu_name = execute_command("nvidia-smi --query-gpu=gpu_name --format=csv,noheader");
             int vram_temp = -1;
 
-            read_nvidia_vram_temp(&vram_temp);
+            read_nvidia_vram_temp(nvidia_bus_id, &vram_temp);
 
             printf(BOLD "%s" RESET "\n", nvidia_gpu_name ? nvidia_gpu_name : "NVIDIA GPU");
             printf("Temp     : %.2f°C\n", gpu_temp_nvidia);
@@ -843,7 +959,9 @@ int main()
     print_system_info();
     print_motherboard_and_fan_info();
     print_cpu_info();
+#ifdef ENABLE_DRAM
     print_dram_info();
+#endif
     print_gpu_info();
     print_nvme_info();
 

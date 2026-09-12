@@ -1,95 +1,151 @@
 # Ryzen Power
 
-Kumpulan utilitas baris perintah sederhana untuk memantau berbagai sensor perangkat keras pada sistem Linux, dengan fokus pada CPU AMD Ryzen. Utilitas ini membaca data langsung dari antarmuka sysfs dan mengeksekusi beberapa perintah eksternal untuk mendapatkan informasi yang komprehensif.
+Command-line utilities that read hardware sensors on Linux. They read sysfs, hwmon and
+`/proc` directly, and call `dmidecode`, `nvidia-smi` or `rocm-smi` for the rest.
+
+The tools print plain text. `powerusage` uses Nerd Font glyphs, so install a Nerd Font
+for correct icons.
 
 ![Screenshot](screenshot.png)
 ![Screenshot](screenshot-stats.png)
 
-## Fitur
+## Tools
 
-Proyek ini menyediakan empat utilitas terpisah:
+1. `ryzen` — CPU power draw in watts. Prints one number.
+2. `cpuf` — live monitor: CPU name, temperatures, power, and per-core frequency.
+3. `powerusage` — one status line for the CPU or the GPU. Made for panels and bars.
+4. `sens` — full one-shot sensor report for the whole system.
 
-1.  `ryzen`: Menampilkan konsumsi daya CPU saat ini dalam Watt.
-2.  `cpuf`: Menampilkan frekuensi, suhu, dan daya CPU secara real-time.
-3.  `powerusage`: Menampilkan statistik penggunaan untuk CPU atau GPU.
-4.  `sens`: Utilitas pemantauan sensor lengkap untuk seluruh sistem.
+## Prerequisites
 
-## Prasyarat
+- `gcc`
+- `libpci` (needed by `powerusage`; also used by `sens` for NVIDIA GPU register reads)
+- `dmidecode` (needed by `sens` for board, CPU and DRAM model strings)
+- AMD GPU: `rocm-smi`
+- NVIDIA GPU: `nvidia-smi` and the NVIDIA Management Library (NVML)
+- Optional: CUDA SDK, used only to detect NVIDIA support at build time
 
-- `gcc` (GNU Compiler Collection)
-- `libpci-dev` (atau yang setara) untuk `powerusage`
-- `lm-sensors` (opsional, untuk beberapa data sensor)
-- `rocm-smi` (untuk GPU AMD)
-- `nvidia-ml` (NVML) dan `CUDA SDK` (untuk GPU NVIDIA)
-- `dmidecode`
-
-## Kompilasi
-
-Untuk mengkompilasi semua utilitas, jalankan skrip build:
+## Build
 
 ```bash
 ./build.sh
 ```
 
-Skrip akan secara otomatis mendeteksi keberadaan NVIDIA CUDA SDK dan mengkompilasi `powerusage` dengan dukungan untuk GPU NVIDIA jika ditemukan.
+The script looks for `/opt/cuda`. If it finds that directory, it builds `powerusage`
+and `sens` with `-DNVIDIA_GPU`. Otherwise it builds them for AMD or Intel only.
 
-## Penggunaan
+### DRAM temperature (spd5118)
 
-### 1. `ryzen`
-
-Utilitas paling dasar. Cukup jalankan untuk mendapatkan konsumsi daya CPU saat ini.
-
-```bash
-./ryzen
-```
-
-Outputnya adalah nilai tunggal dalam Watt.
-
-### 2. `cpuf`
-
-Menampilkan informasi terperinci tentang CPU, termasuk nama model, suhu (Tctl/Tccd), konsumsi daya, dan frekuensi setiap inti.
+DRAM sensor output is off by default. Enable it at build time:
 
 ```bash
-./cpuf
+ENABLE_DRAM=1 ./build.sh
 ```
 
-### 3. `powerusage`
+The flag adds a `-DENABLE_DRAM` build of `powerusage cpu` (two extra DRAM readings) and
+adds the DRAM section to `sens`. It does not change the binary at runtime, so you must
+rebuild to turn it on or off.
 
-Menyediakan statistik untuk CPU atau GPU. Anda harus menentukan target (`cpu` atau `gpu`).
+## Install
 
-**Untuk CPU:**
+The binaries run from the current directory. To install them on the PATH:
 
 ```bash
-./powerusage cpu
+sudo cp -f ryzen cpuf powerusage sens /usr/local/bin/
 ```
 
-Menampilkan penggunaan CPU (%), penggunaan memori (GB), suhu CPU, suhu DRAM, dan konsumsi daya CPU.
+Reinstall after every rebuild. Otherwise you keep testing the old copy.
 
-**Untuk GPU:**
+## Usage
+
+### `ryzen`
 
 ```bash
-./powerusage gpu
+ryzen
 ```
 
-Menampilkan penggunaan GPU (%), penggunaan VRAM (%), suhu (tepi, sambungan, memori), dan konsumsi daya GPU. Mendukung GPU AMD (melalui `rocm-smi`) dan NVIDIA (melalui `NVML`).
+Output: one float, watts. Example: `41.77`
 
-### 4. `sens`
-
-Alat pemantauan sensor terlengkap. Memberikan gambaran umum tentang berbagai suhu dan kecepatan kipas di seluruh sistem.
+### `cpuf`
 
 ```bash
-./sens
+cpuf
 ```
 
-Output mencakup:
-- Informasi sistem (Motherboard)
-- Suhu Motherboard (Mobo, VRM, Chipset)
-- Kecepatan Kipas
-- Informasi CPU (Nama, Suhu, Daya)
-- Informasi DRAM (Model, Suhu)
-- Informasi GPU (Suhu, Daya)
-- Informasi SSD NVMe (Suhu)
+Redraws every second until you press Ctrl+C. It shows:
 
-## Lisensi
+- CPU model name, read from `/proc/cpuinfo`
+- Every k10temp label it finds (Tctl, Tccd1, Tccd2, ...)
+- CPU package power in watts
+- Current and peak frequency for every logical core
 
-Proyek ini dilisensikan di bawah Lisensi Publik Umum GNU v2.0. Lihat file `LICENSE` untuk detailnya.
+The `max` value per core counts from the moment you start the program.
+
+### `powerusage`
+
+The first argument selects the target:
+
+```bash
+powerusage cpu
+powerusage gpu
+```
+
+`powerusage cpu` prints CPU usage, current core frequency, peak recorded frequency,
+used memory, CPU temperature, and power:
+
+```
+ 1 % |  4.371 MHz |  5.745 MHz |  4.7 GB |  60 °C |  41 W
+```
+
+`powerusage gpu` detects the GPU vendor and prints utilization, core clock, memory
+clock, framebuffer use, temperatures, and power. AMD uses `rocm-smi`. NVIDIA uses NVML.
+
+**NVIDIA memory and hotspot temperatures need root.** These are not in NVML. The tool
+reads them straight from the GPU BAR0 registers through `/dev/mem`:
+
+```bash
+sudo powerusage gpu
+```
+
+Your kernel must allow `/dev/mem` reads of device memory. Add `iomem=relaxed` to the
+kernel command line if the read returns nothing. Memory and hotspot temperature then
+show as 0.
+
+### `sens`
+
+```bash
+sudo sens
+```
+
+Run it as root. `dmidecode` needs root, and so does the NVIDIA VRAM register read.
+Without root you still get temperatures and fan speeds, but the board, CPU and DRAM
+model lines fall back to generic labels.
+
+The report covers:
+
+- Board vendor and product name
+- Fan speeds (radiator, front, rear, pump, bottom)
+- CPU model, temperatures and power
+- DRAM part number and temperature (only with `ENABLE_DRAM=1`)
+- GPU name, temperature, VRAM temperature and power
+- Each NVMe drive and its NAND temperature
+
+## Notes
+
+- **RAPL path.** The tools read `/sys/class/powercap/intel-rapl:0/energy_uj`. That path
+  also works on AMD. The file must be readable by your user. Kernel 7.x wraps that
+  counter at `max_energy_range_uj`, so the tools correct for the wrap. Without root, a
+  kernel patch may be needed to make `energy_uj` world-readable.
+- **`/tmp/cpu_stats.txt`.** `powerusage cpu` stores `AVG`, `MAX` and `CUR` frequency
+  there. `MAX` only ratchets upward, so the peak survives between runs. The file is
+  locked with `flock()` because panel pollers and manual runs share it. Delete the file
+  to reset the peak.
+- **Board sensors.** Motherboard, VRM and chipset readings are compiled but not printed.
+  The label to channel mapping is not confirmed on every board.
+- **Fan and chip selection.** `sens` matches super I/O chips by the `nct6` name prefix
+  and picks the instance with the most fan inputs. The fan index to header mapping is
+  fixed: fan1 radiator, fan2 front, fan3 rear, fan4 pump, fan6 bottom 1, fan7 bottom 2.
+
+## License
+
+GNU General Public License v2.0. See [LICENSE](LICENSE).

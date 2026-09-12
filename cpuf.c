@@ -29,6 +29,8 @@
 #include <fcntl.h>
 #include <libgen.h>
 
+#include "fmt_mhz.h"
+
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
 #define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 #define BUFFER_SIZE 256
@@ -413,53 +415,6 @@ void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
         stats[i].sum += freq;
         stats[i].count++;
     }
-}
-
-/**
- * @brief Format angka MHz dengan pemisah ribuan gaya Indonesia (titik).
- *
- * Contoh: 5712 menjadi "5.712 MHz", 624 menjadi "624 MHz".
- *
- * @param buf   Buffer tujuan.
- * @param size  Ukuran buffer.
- * @param mhz   Nilai frekuensi dalam MHz.
- * @return const char * Pointer ke buffer.
- */
-static const char *fmt_mhz(char *buf, size_t size, int mhz)
-{
-    char digits[16];
-    int neg = mhz < 0;
-    unsigned int v = neg ? (unsigned int)-(long)mhz : (unsigned int)mhz;
-    int n = 0;
-
-    do
-    {
-        digits[n++] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    while (v && n < (int)sizeof(digits));
-
-    int pos = 0;
-
-    if (neg && pos < (int)size - 1)
-        buf[pos++] = '-';
-
-    for (int i = n - 1; i >= 0; i--)
-    {
-        /* Titik dicetak di depan digit kalau sisa digit (termasuk yang ini)
-         * habis dibagi 3, dan bukan di paling depan. */
-        int remaining = i + 1;
-
-        if (pos > (neg ? 1 : 0) && remaining % 3 == 0 && pos < (int)size - 1)
-            buf[pos++] = '.';
-
-        if (pos < (int)size - 1)
-            buf[pos++] = digits[i];
-    }
-
-    snprintf(buf + pos, size - (size_t)pos, " MHz");
-
-    return buf;
 }
 
 /**

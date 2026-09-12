@@ -33,14 +33,14 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <pci/pci.h>
-#include <signal.h>
 #include <glob.h>
 #include <limits.h>
-#include <syslog.h>
 
 #ifdef NVIDIA_GPU
 #include <nvml.h>
 #endif
+
+#include "fmt_mhz.h"
 
 #define RAPL_FILE_PATH "/sys/class/powercap/intel-rapl:0/energy_uj"
 #define RAPL_RANGE_PATH "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
@@ -341,53 +341,6 @@ static int read_hwmon_temp(const char *hwmon_path, const char *temp_file)
     fclose(f);
 
     return temp;
-}
-
-/**
- * @brief Format angka MHz dengan pemisah ribuan gaya Indonesia (titik).
- *
- * Contoh: 5712 menjadi "5.712 MHz", 624 menjadi "624 MHz".
- *
- * @param buf   Buffer tujuan.
- * @param size  Ukuran buffer.
- * @param mhz   Nilai frekuensi dalam MHz.
- * @return const char * Pointer ke buffer.
- */
-static const char *fmt_mhz(char *buf, size_t size, int mhz)
-{
-    char digits[16];
-    int neg = mhz < 0;
-    unsigned int v = neg ? (unsigned int)-(long)mhz : (unsigned int)mhz;
-    int n = 0;
-
-    do
-    {
-        digits[n++] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    while (v && n < (int)sizeof(digits));
-
-    int pos = 0;
-
-    if (neg && pos < (int)size - 1)
-        buf[pos++] = '-';
-
-    for (int i = n - 1; i >= 0; i--)
-    {
-        /* Titik dicetak di depan digit kalau sisa digit (termasuk yang ini)
-         * habis dibagi 3, dan bukan di paling depan. */
-        int remaining = i + 1;
-
-        if (pos > (neg ? 1 : 0) && remaining % 3 == 0 && pos < (int)size - 1)
-            buf[pos++] = '.';
-
-        if (pos < (int)size - 1)
-            buf[pos++] = digits[i];
-    }
-
-    snprintf(buf + pos, size - (size_t)pos, " MHz");
-
-    return buf;
 }
 
 /**
@@ -887,13 +840,14 @@ void print_nvidia_gpu_info(void)
                 continue;
             }
 
-            int nvidia_fd = open(MEM_PATH, O_RDWR | O_SYNC);
+            /* Register suhu VRAM hanya dibaca; tidak perlu akses tulis. */
+            int nvidia_fd = open(MEM_PATH, O_RDONLY);
 
             if (nvidia_fd < 0)
                 break;
 
             uint32_t vram_addr = (dev->base_addr[0] & 0xFFFFFFFF) + VRAM_REGISTER_OFFSET;
-            void *nvidia_map_base = mmap(NULL, PG_SZ, PROT_READ | PROT_WRITE, MAP_SHARED, nvidia_fd, vram_addr & ~(PG_SZ - 1));
+            void *nvidia_map_base = mmap(NULL, PG_SZ, PROT_READ, MAP_SHARED, nvidia_fd, vram_addr & ~(PG_SZ - 1));
 
             if (nvidia_map_base != MAP_FAILED)
             {
