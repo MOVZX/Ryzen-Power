@@ -40,6 +40,7 @@ DRAM_FLAGS=()
 case "${ENABLE_DRAM:-0}" in
     1 | true | True | TRUE | yes | Yes | YES | on | On | ON)
         echo -e "\e[36m\u2139 DRAM temperature (spd5118) enabled.\e[0m"
+
         DRAM_FLAGS=(-DENABLE_DRAM)
         ;;
 esac
@@ -65,13 +66,14 @@ if [ "$NVIDIA_DISABLED_BY_ENV" = "1" ]; then
     echo -e "\e[33m\u2139 NVIDIA support disabled by NVIDIA=${NVIDIA}. CPU only. 💻\e[0m"
 elif [ "$USE_NVIDIA" = "1" ]; then
     echo -e "\e[32m✔ NVIDIA CUDA SDK found at $CUDA_DIR. Compiling with NVIDIA support. 🚀\e[0m"
+
     NVIDIA_FLAGS=(-DNVIDIA_GPU -I"$CUDA_DIR/include")
     NVIDIA_LIBS=(-lpci -lnvidia-ml)
 else
     echo -e "\e[33mℹ NVIDIA CUDA SDK not found. Compiling without NVIDIA support. CPU only. 💻\e[0m"
 fi
 
-# build <target-name> <source-file> [extra libraries]
+# build <target-name> [libraries...]
 build()
 {
     local target="$1"
@@ -80,15 +82,15 @@ build()
     "$CC" "${OPT_FLAGS[@]}" "${STRICT_FLAGS[@]}" \
         ${NVIDIA_FLAGS[@]+"${NVIDIA_FLAGS[@]}"} \
         ${DRAM_FLAGS[@]+"${DRAM_FLAGS[@]}"} \
-        -o "$target" "$target.c" -lpci "$@" -lm
+        -o "$target" "$target.c" "$@" -lm
 }
 
-# GPU register access through libpci and NVML exists only in the NVIDIA build.
-# A CPU-only build therefore needs no extra library.
+# libpci is used only by sens and powerusage, which read GPU registers
+# through /dev/mem.
 build ryzen
 build cpuf
-build sens "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
-build powerusage "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
+build sens -lpci "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
+build powerusage -lpci "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
 
 echo -e "\e[32m✔ Build completed.\e[0m"
 

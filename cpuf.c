@@ -90,6 +90,11 @@ static void record_sample(FreqStats *stats, const int *freqs, int cpu_count)
 /**
  * @brief Print the formatted CPU information.
  *
+ * The function prints the temperatures, the power, the per-core frequencies
+ * with their maximum value, and the overall summary. Cur is the highest
+ * frequency on the last sample. Max is the highest frequency since the start
+ * of the program.
+ *
  * @param sensors Array of CPU temperature sensors.
  * @param sensor_count Number of CPU temperature sensors.
  * @param cpu_power CPU power in watts.
@@ -121,7 +126,21 @@ static void print_cpu_info(const TempSensor *sensors, int sensor_count, float cp
                fmt_mhz(fmax, sizeof(fmax), stats[i].max));
     }
 
-    printf("\n");
+    int cur_mhz = 0, max_mhz = 0;
+
+    for (int i = 0; i < cpu_count; i++)
+    {
+        if (stats[i].last > cur_mhz)
+            cur_mhz = stats[i].last;
+
+        if (stats[i].max > max_mhz)
+            max_mhz = stats[i].max;
+    }
+
+    char fcur[24], fmax2[24];
+
+    printf("\nCur: %s\n", fmt_mhz(fcur, sizeof(fcur), cur_mhz));
+    printf("Max: %s\n", fmt_mhz(fmax2, sizeof(fmax2), max_mhz));
 }
 
 /**
@@ -167,13 +186,17 @@ int main(void)
         return 1;
     }
 
+    int read_fail_ticks = 0;
+
     printf(CLEAR_SCREEN);
 
     while (1)
     {
         /* The program resolves the k10temp path one time only. The hwmon index
-         * can change after a module reload, so resolve the path again only when
-         * the temperature read fails. */
+         * can change after a module reload, so resolve the path again when the
+         * temperature read fails. Re-resolving every tick is expensive, so
+         * after one failed re-resolve wait five ticks before the next attempt.
+         * The monitor keeps running while the sensor is missing. */
         if (hwmon_path[0] == '\0' && find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) != 0)
         {
             fprintf(stderr, "k10temp sensor module not found!\n");
@@ -188,29 +211,23 @@ int main(void)
 
         if (sensor_count == 0)
         {
-            hwmon_path[0] = '\0';
-
-            if (find_hwmon_path_by_name("k10temp", hwmon_path, sizeof(hwmon_path)) != 0)
+            if (read_fail_ticks == 0 || read_fail_ticks % 5 == 0)
             {
-                fprintf(stderr, "k10temp sensor module not found!\n");
+                char new_path[PATH_MAX];
 
-                free(cpu_freqs);
-                free(stats);
+                if (find_hwmon_path_by_name("k10temp", new_path, sizeof(new_path)) == 0)
+                {
+                    snprintf(hwmon_path, sizeof(hwmon_path), "%s", new_path);
 
-                return 1;
+                    sensor_count = read_labelled_temps(hwmon_path, sensors, MAX_CPU_SENSORS);
+                }
             }
 
-            sensor_count = read_labelled_temps(hwmon_path, sensors, MAX_CPU_SENSORS);
-
-            if (sensor_count == 0)
-            {
-                fprintf(stderr, "Failed to read CPU temperatures.\n");
-
-                free(cpu_freqs);
-                free(stats);
-
-                return 1;
-            }
+            read_fail_ticks++;
+        }
+        else
+        {
+            read_fail_ticks = 0;
         }
 
         float cpu_power = measure_cpu_power();

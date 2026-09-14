@@ -173,7 +173,8 @@ static inline const char *fmt_mhz(char *buf, size_t size, int mhz)
  * process, so repeated calls are expensive.
  *
  * @param command The shell command.
- * @return char* First output line without trailing whitespace, or NULL on error.
+ * @return char* First output line without trailing whitespace, or NULL on
+ *              error or when the first line is empty.
  */
 static inline char *execute_command(const char *command)
 {
@@ -204,6 +205,14 @@ static inline char *execute_command(const char *command)
         /* dmidecode and nvidia-smi often add padding at the end of the line. */
         while (len > 0 && isspace((unsigned char)output[len - 1]))
             output[--len] = '\0';
+
+        /* An empty first line carries no data, so report it like an error. */
+        if (len == 0)
+        {
+            free(output);
+
+            output = NULL;
+        }
     }
 
     pclose(fp);

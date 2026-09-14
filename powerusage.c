@@ -46,7 +46,6 @@
 #define NVIDIA_HOTSPOT_TEMP_SHIFT 8
 #define NVIDIA_HOTSPOT_TEMP_MASK 0xff
 #define NVIDIA_HOTSPOT_VALID_MAX 0x7f
-#define PG_SZ sysconf(_SC_PAGE_SIZE)
 #define MEM_PATH "/dev/mem"
 #define MAX_DEVICES 1
 #define DEBUG_ENV_VAR "RYZEN_POWER_DEBUG"
@@ -132,20 +131,19 @@ float get_memory_usage(void)
 }
 
 /**
- * @brief Get the CPU frequency in MHz from all cores: average and maximum.
+ * @brief Get the highest CPU frequency in MHz from all cores.
  *
  * The function reads scaling_cur_freq for every online core. The path is
  * "cpu" in most cases, with a "platform-cpufreq" fallback for kernel 6.10
- * and newer. The function then calculates the average frequency and the
- * highest frequency over all cores.
+ * and newer. The function then calculates the highest frequency over all
+ * cores.
  *
- * @param out_avg Storage for the average frequency in MHz. -1 when no data exists.
  * @param out_max Storage for the maximum frequency in MHz. -1 when no data exists.
  */
-static void get_cpu_freqs(int *out_avg, int *out_max)
+static void get_cpu_freqs(int *out_max)
 {
     char path[PATH_MAX];
-    int max_mhz = -1, sum_mhz = 0, count = 0;
+    int max_mhz = -1;
 
     for (int cpu = 0;; cpu++)
     {
@@ -181,8 +179,6 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
             if (mhz > max_mhz)
                 max_mhz = mhz;
 
-            sum_mhz += mhz;
-            count++;
             found = 1;
         }
 
@@ -199,16 +195,14 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
     }
 
     *out_max = max_mhz;
-    *out_avg = count > 0 ? (int)((sum_mhz + count / 2) / count) : -1;
 }
 
 /**
  * @brief Read, merge, and store the CPU frequency statistics in one locked operation.
  *
  * The file is /tmp/cpu_stats.txt with the format "KEY: number" on each line
- * (AVG, MAX, CUR). MAX is the highest frequency ever recorded and can only
- * rise. AVG is the average of all cores on the last sample. CUR is the
- * highest core frequency on the last sample.
+ * (MAX, CUR). MAX is the highest frequency ever recorded and can only
+ * rise. CUR is the highest core frequency on the last sample.
  *
  * The code uses flock() because this application runs one time per call and
  * can run in turn, for example from a panel poller. Without the lock, two
@@ -219,9 +213,9 @@ static void get_cpu_freqs(int *out_avg, int *out_max)
  */
 void update_cpu_freqs(int *out_cur, int *out_max)
 {
-    int cur_avg = -1, cur_max = -1;
+    int cur_max = -1;
 
-    get_cpu_freqs(&cur_avg, &cur_max);
+    get_cpu_freqs(&cur_max);
 
     /* O_NOFOLLOW: do not follow a symlink that another user planted in /tmp. */
     int lock_fd = open(CPU_STATS_PATH, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
@@ -238,7 +232,7 @@ void update_cpu_freqs(int *out_cur, int *out_max)
     flock(lock_fd, LOCK_EX);
 
     /* Read again INSIDE the lock so the merged values are really the latest. */
-    int old_avg = -1, old_max = -1, old_cur = -1;
+    int old_max = -1, old_cur = -1;
     char line[64];
     char key[16];
     int value;
@@ -253,9 +247,7 @@ void update_cpu_freqs(int *out_cur, int *out_max)
                 if (sscanf(line, "%15[a-zA-Z_]: %d", key, &value) != 2)
                     continue;
 
-                if (strcmp(key, "AVG") == 0)
-                    old_avg = value;
-                else if (strcmp(key, "MAX") == 0)
+                if (strcmp(key, "MAX") == 0)
                     old_max = value;
                 else if (strcmp(key, "CUR") == 0)
                     old_cur = value;
@@ -263,7 +255,7 @@ void update_cpu_freqs(int *out_cur, int *out_max)
         }
     }
 
-    /* MAX: can only rise. AVG: the newest sample. */
+    /* MAX: can only rise. */
 
     int max_mhz = cur_max;
 
@@ -272,15 +264,13 @@ void update_cpu_freqs(int *out_cur, int *out_max)
     else if (old_max > max_mhz)
         max_mhz = old_max;
 
-    int avg_mhz = cur_avg >= 0 ? cur_avg : old_avg;
-
     /* CUR: the highest core frequency on the last sample, with no history. */
     int cur_mhz = cur_max >= 0 ? cur_max : old_cur;
 
-    /* Write only when something changed: a higher MAX, or a changed AVG/CUR.
+    /* Write only when something changed: a higher MAX, or a changed CUR.
      * An old value never loses to a worse number. Write through a unique
      * temporary file, then use rename (atomic). */
-    int changed = (max_mhz != old_max) || (avg_mhz != old_avg) || (cur_mhz != old_cur);
+    int changed = (max_mhz != old_max) || (cur_mhz != old_cur);
 
     if (changed && max_mhz >= 0)
     {
@@ -293,7 +283,6 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
             if (tf)
             {
-                fprintf(tf, "AVG: %d\n", avg_mhz);
                 fprintf(tf, "MAX: %d\n", max_mhz);
                 fprintf(tf, "CUR: %d\n", cur_mhz);
                 fclose(tf);
@@ -449,7 +438,7 @@ void print_cpu_info(void)
 #endif
 
     {
-        char favg[24], fmax[24];
+        char fcur[24], fmax[24];
 
         printf("󰻠 %.0f %% | 󰾾 %s | 󰾾 %s |  %.1f GB |  %d °C | "
                " %d °C |  %d °C | "
@@ -457,7 +446,7 @@ void print_cpu_info(void)
                " %d °C |  %d °C | "
 #endif
                "󰚥 %.0f W\n",
-               cpu_usage, fmt_mhz(favg, sizeof(favg), freq_cur),
+               cpu_usage, fmt_mhz(fcur, sizeof(fcur), freq_cur),
                fmt_mhz(fmax, sizeof(fmax), freq_max), used_memory_gb,
                cpu_temperature1 != -1 ? temp_c_rounded(cpu_temperature1) : 0,
                pch_temperature1 != -1 ? temp_c_rounded(pch_temperature1) : 0,
@@ -471,59 +460,215 @@ void print_cpu_info(void)
 }
 
 /**
+ * @brief Run a shell command and capture its full output.
+ *
+ * The caller must free the returned memory.
+ *
+ * @param command The shell command.
+ * @return char* The output without trailing whitespace, or NULL on error or
+ *              when the output is empty.
+ */
+static char *execute_command_full(const char *command)
+{
+    FILE *fp = popen(command, "r");
+
+    if (fp == NULL)
+        return NULL;
+
+    char *output = malloc(8192);
+
+    if (output == NULL)
+    {
+        pclose(fp);
+
+        return NULL;
+    }
+
+    size_t total = 0;
+
+    while (total < 8191 && fgets(output + total, (int)(8192 - total), fp) != NULL)
+        total += strlen(output + total);
+
+    pclose(fp);
+
+    while (total > 0 && isspace((unsigned char)output[total - 1]))
+        output[--total] = '\0';
+
+    if (total == 0)
+    {
+        free(output);
+
+        return NULL;
+    }
+
+    return output;
+}
+
+/**
+ * @brief One rocm-smi reading of the AMD GPU.
+ */
+typedef struct
+{
+    float usage;
+    float vram;
+    float edge;
+    float junction;
+    float memory;
+    float power;
+    float clock;
+    float mem_clock;
+} GpuMetrics;
+
+/**
+ * @brief Take the last whitespace-separated field of a line as a number.
+ *
+ * @param line The line.
+ * @return float The value, or -1.0f when no field exists.
+ */
+static float last_field_value(const char *line)
+{
+    const char *end = line + strlen(line);
+
+    while (end > line && isspace((unsigned char)end[-1]))
+        end--;
+
+    if (end == line)
+        return -1.0f;
+
+    const char *start = end;
+
+    while (start > line && !isspace((unsigned char)start[-1]))
+        start--;
+
+    return (float)atof(start);
+}
+
+/**
+ * @brief Take the Nth whitespace-separated field of a line as a number.
+ *
+ * @param line The line.
+ * @param n Field index, 1-based.
+ * @return float The value, or -1.0f when the field does not exist.
+ */
+static float field_value(const char *line, int n)
+{
+    const char *p = line;
+    int field = 1;
+
+    while (field <= n)
+    {
+        while (*p && isspace((unsigned char)*p))
+            p++;
+
+        if (*p == '\0')
+            return -1.0f;
+
+        const char *start = p;
+
+        while (*p && !isspace((unsigned char)*p))
+            p++;
+
+        if (field == n)
+        {
+            char token[64];
+            size_t len = (size_t)(p - start);
+
+            if (len >= sizeof(token))
+                len = sizeof(token) - 1;
+
+            memcpy(token, start, len);
+
+            token[len] = '\0';
+
+            return (float)atof(token);
+        }
+
+        field++;
+    }
+
+    return -1.0f;
+}
+
+/**
+ * @brief Parse the rocm-smi output into the GPU metrics.
+ *
+ * The line patterns are the same patterns the old awk filters matched. The
+ * function changes the output buffer, so the caller must not need it after.
+ *
+ * @param output The full rocm-smi output.
+ * @param metrics Storage for the parsed values.
+ * @return int 1 when the required values exist, 0 otherwise.
+ */
+static int parse_rocm_output(char *output, GpuMetrics *metrics)
+{
+    metrics->usage = -1.0f;
+    metrics->vram = -1.0f;
+    metrics->edge = -1.0f;
+    metrics->junction = -1.0f;
+    metrics->memory = -1.0f;
+    metrics->power = -1.0f;
+    metrics->clock = -1.0f;
+    metrics->mem_clock = -1.0f;
+
+    for (char *line = strtok(output, "\n"); line != NULL; line = strtok(NULL, "\n"))
+    {
+        if (strstr(line, "GPU use (%)") != NULL)
+            metrics->usage = last_field_value(line);
+        else if (strstr(line, "GPU Memory Allocated (VRAM%)") != NULL)
+            metrics->vram = last_field_value(line);
+        else if (strstr(line, "Temperature (Sensor edge) (C):") != NULL)
+            metrics->edge = last_field_value(line);
+        else if (strstr(line, "Temperature (Sensor junction) (C):") != NULL)
+            metrics->junction = last_field_value(line);
+        else if (strstr(line, "Temperature (Sensor memory) (C):") != NULL)
+            metrics->memory = last_field_value(line);
+        else if (strstr(line, "Average Graphics Package Power (W):") != NULL)
+            metrics->power = last_field_value(line);
+        else if (strstr(line, "sclk") != NULL)
+            metrics->clock = field_value(line, 3);
+        else if (strstr(line, "mclk") != NULL)
+            metrics->mem_clock = field_value(line, 3);
+    }
+
+    return (metrics->usage >= 0 && metrics->vram >= 0 && metrics->edge >= 0) ? 1 : 0;
+}
+
+/**
  * @brief Print the AMD GPU usage, temperature, and power information.
  *
- * The function uses rocm-smi to get and print the metrics for the AMD GPU.
+ * The function runs rocm-smi one time and parses its output. The old code
+ * ran the tool eight times, so one call replaces the old eight calls.
  */
 void print_amd_gpu_info(void)
 {
-    char *gpu_usage = execute_command("rocm-smi -d 0 --showuse | awk '/GPU use \\(%\\)/ {print $NF}'");
-    char *gpu_vram_usage = execute_command("rocm-smi -d 0 --showmemuse | awk '/GPU Memory Allocated \\(VRAM%\\)/ {print $NF}'");
-    char *gpu_temperature1 = execute_command("rocm-smi -t | awk '/Temperature \\(Sensor edge\\) \\(C\\):/ {print $NF}'");
-    char *gpu_temperature2 = execute_command("rocm-smi -t | awk '/Temperature \\(Sensor junction\\) \\(C\\):/ {print $NF}'");
-    char *gpu_temperature3 = execute_command("rocm-smi -t | awk '/Temperature \\(Sensor memory\\) \\(C\\):/ {print $NF}'");
-    char *gpu_power = execute_command("rocm-smi -P | awk '/Average Graphics Package Power \\(W\\):/ {print $NF}'");
-    char *gpu_clock = execute_command("rocm-smi --showclocks | awk '/sclk/ {print $3; exit}'");
-    char *gpu_mem_clock = execute_command("rocm-smi --showclocks | awk '/mclk/ {print $3; exit}'");
+    char *output = execute_command_full("rocm-smi -d 0 --showuse --showmemuse --showtemp --showpower --showclocks");
 
-    if (gpu_temperature1 && gpu_usage && gpu_vram_usage)
+    if (output == NULL)
+    {
+        if (dbg_enabled())
+            fprintf(stderr, "rocm-smi returned no output.\n");
+
+        return;
+    }
+
+    GpuMetrics metrics;
+
+    if (parse_rocm_output(output, &metrics))
     {
         char fclk[24], fmemclk[24];
 
         printf("󰻠 %.0f %% | 󰻠 %.0f %% | 󰾾 %s | 󰾾 %s |  %.0f °C |  %.0f °C |  %.0f °C | 󰚥 %.0f W\n",
-               atof(gpu_usage),
-               atof(gpu_vram_usage),
-               fmt_mhz(fclk, sizeof(fclk), gpu_clock ? atoi(gpu_clock) : 0),
-               fmt_mhz(fmemclk, sizeof(fmemclk), gpu_mem_clock ? atoi(gpu_mem_clock) : 0),
-               atof(gpu_temperature1),
-               gpu_temperature2 ? atof(gpu_temperature2) : 0.0f,
-               gpu_temperature3 ? atof(gpu_temperature3) : 0.0f,
-               gpu_power ? atof(gpu_power) : 0.0f);
+               metrics.usage,
+               metrics.vram,
+               fmt_mhz(fclk, sizeof(fclk), metrics.clock >= 0 ? (int)metrics.clock : 0),
+               fmt_mhz(fmemclk, sizeof(fmemclk), metrics.mem_clock >= 0 ? (int)metrics.mem_clock : 0),
+               metrics.edge,
+               metrics.junction >= 0 ? metrics.junction : 0.0f,
+               metrics.memory >= 0 ? metrics.memory : 0.0f,
+               metrics.power >= 0 ? metrics.power : 0.0f);
     }
 
-    if (gpu_usage)
-        free(gpu_usage);
-
-    if (gpu_vram_usage)
-        free(gpu_vram_usage);
-
-    if (gpu_temperature1)
-        free(gpu_temperature1);
-
-    if (gpu_temperature2)
-        free(gpu_temperature2);
-
-    if (gpu_temperature3)
-        free(gpu_temperature3);
-
-    if (gpu_power)
-        free(gpu_power);
-
-    if (gpu_clock)
-        free(gpu_clock);
-
-    if (gpu_mem_clock)
-        free(gpu_mem_clock);
+    free(output);
 }
 
 #ifdef NVIDIA_GPU
@@ -538,6 +683,8 @@ void print_nvidia_gpu_info(void)
     nvmlReturn_t result;
     struct pci_access *pacc = NULL;
     unsigned int device_count = 0;
+    long page_size = sysconf(_SC_PAGE_SIZE);
+
     result = nvmlInit();
 
     if (result != NVML_SUCCESS)
@@ -640,26 +787,26 @@ void print_nvidia_gpu_info(void)
                 break;
 
             uint32_t vram_addr = (dev->base_addr[0] & 0xFFFFFFFF) + VRAM_REGISTER_OFFSET;
-            void *nvidia_map_base = mmap(NULL, PG_SZ, PROT_READ, MAP_SHARED, nvidia_fd, vram_addr & ~(PG_SZ - 1));
+            void *nvidia_map_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, nvidia_fd, vram_addr & ~(page_size - 1));
 
             if (nvidia_map_base != MAP_FAILED)
             {
-                uint32_t *vram_reg = (uint32_t *)((char *)nvidia_map_base + (vram_addr & (PG_SZ - 1)));
+                uint32_t *vram_reg = (uint32_t *)((char *)nvidia_map_base + (vram_addr & (page_size - 1)));
                 vram_temp = (*vram_reg & NVIDIA_VRAM_TEMP_MASK) / NVIDIA_VRAM_TEMP_DIVISOR;
 
-                munmap(nvidia_map_base, PG_SZ);
+                munmap(nvidia_map_base, page_size);
             }
 
             uint32_t hotspot_addr = (dev->base_addr[0] & 0xFFFFFFFF) + HOTSPOT_REGISTER_OFFSET;
-            void *hotspot_base = mmap(NULL, PG_SZ, PROT_READ, MAP_SHARED, nvidia_fd, hotspot_addr & ~(PG_SZ - 1));
+            void *hotspot_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, nvidia_fd, hotspot_addr & ~(page_size - 1));
 
             if (hotspot_base != MAP_FAILED)
             {
-                uint32_t *hotspot_reg = (uint32_t *)((char *)hotspot_base + (hotspot_addr & (PG_SZ - 1)));
+                uint32_t *hotspot_reg = (uint32_t *)((char *)hotspot_base + (hotspot_addr & (page_size - 1)));
                 uint32_t temp_hotspot = (*hotspot_reg >> NVIDIA_HOTSPOT_TEMP_SHIFT) & NVIDIA_HOTSPOT_TEMP_MASK;
                 hotspot_temp = (temp_hotspot < NVIDIA_HOTSPOT_VALID_MAX) ? temp_hotspot : 0;
 
-                munmap(hotspot_base, PG_SZ);
+                munmap(hotspot_base, page_size);
             }
 
             close(nvidia_fd);
