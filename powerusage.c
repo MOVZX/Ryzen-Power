@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/file.h>
@@ -231,12 +232,16 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     flock(lock_fd, LOCK_EX);
 
-    /* Read again INSIDE the lock so the merged values are really the latest. */
+    /* Read again INSIDE the lock so the merged values are really the latest.
+     * The stream opens the same descriptor for read and write. The file is
+     * never renamed: a rename detaches the inode that the flock protects,
+     * so a second writer can lock the old file and overwrite the new one
+     * with a stale, lower MAX. */
     int old_max = -1, old_cur = -1;
     char line[64];
     char key[16];
     int value;
-    FILE *f = fdopen(lock_fd, "r");
+    FILE *f = fdopen(lock_fd, "r+");
 
     if (f)
     {
@@ -268,32 +273,18 @@ void update_cpu_freqs(int *out_cur, int *out_max)
     int cur_mhz = cur_max >= 0 ? cur_max : old_cur;
 
     /* Write only when something changed: a higher MAX, or a changed CUR.
-     * An old value never loses to a worse number. Write through a unique
-     * temporary file, then use rename (atomic). */
+     * An old value never loses to a worse number. Write in place under the
+     * lock, then truncate the leftover bytes of the old content. */
     int changed = (max_mhz != old_max) || (cur_mhz != old_cur);
 
-    if (changed && max_mhz >= 0)
+    if (changed && max_mhz >= 0 && f != NULL)
     {
-        char tmp_path[] = "/tmp/cpu_stats.XXXXXX";
-        int tmp_fd = mkstemp(tmp_path);
+        fseek(f, 0, SEEK_SET);
 
-        if (tmp_fd >= 0)
-        {
-            FILE *tf = fdopen(tmp_fd, "w");
-
-            if (tf)
-            {
-                fprintf(tf, "MAX: %d\n", max_mhz);
-                fprintf(tf, "CUR: %d\n", cur_mhz);
-                fclose(tf);
-                rename(tmp_path, CPU_STATS_PATH);
-            }
-            else
-            {
-                close(tmp_fd);
-                unlink(tmp_path);
-            }
-        }
+        fprintf(f, "MAX: %d\n", max_mhz);
+        fprintf(f, "CUR: %d\n", cur_mhz);
+        fflush(f);
+        ftruncate(lock_fd, (off_t)ftell(f));
     }
 
     flock(lock_fd, LOCK_UN);
@@ -831,10 +822,70 @@ cleanup_nvml:
 #endif
 
 /**
+ * @brief Print one line, then wait until the interval is complete.
+ *
+ * The cpu print already spends one second in its measurement window. The
+ * function sleeps only for the rest of the interval, so both targets print
+ * once per interval. The loop runs until a signal ends the process. A
+ * systemd service uses this mode, for example:
+ *   powerusage cpu --daemon --interval 1 --file /dev/shm/powerusage-cpu
+ *
+ * With a file target, the line goes to a temp file first. The temp file is
+ * then renamed over the target (atomic). A reader always sees one complete
+ * line, and the file never holds more than the latest line.
+ */
+static void daemon_loop(void (*printer)(void), int interval_sec, const char *file_path)
+{
+    for (;;)
+    {
+        bool wrote_file = false;
+
+        if (file_path != NULL)
+        {
+            char tmp_path[PATH_MAX];
+
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", file_path);
+            int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+            if (fd >= 0)
+            {
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+                wrote_file = true;
+            }
+        }
+
+        struct timespec start, now;
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        printer();
+        fflush(stdout);
+
+        if (wrote_file)
+        {
+            char tmp_path[PATH_MAX];
+
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", file_path);
+            rename(tmp_path, file_path);
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+
+        long long elapsed_ms = (long long)(now.tv_sec - start.tv_sec) * 1000LL +
+                               (long long)(now.tv_nsec - start.tv_nsec) / 1000000LL;
+        long long remain_ms = (long long)interval_sec * 1000LL - elapsed_ms;
+
+        if (remain_ms > 0)
+            usleep((useconds_t)(remain_ms * 1000));
+    }
+}
+
+/**
  * @brief Program entry point.
  *
  * The function reads the command line arguments to decide whether to show
- * the CPU information or the GPU information.
+ * the CPU information or the GPU information. The --daemon flag repeats the
+ * print once per --interval seconds.
  *
  * @return int 0 on success, 1 on error.
  */
@@ -842,34 +893,91 @@ int main(int argc, char *argv[])
 {
     if (argc < 2 || (strcmp(argv[1], "cpu") && strcmp(argv[1], "gpu")))
     {
-        fprintf(stderr, "Syntax: %s [cpu|gpu], Example: powerusage cpu\n", argv[0]);
+        fprintf(stderr, "Syntax: %s cpu|gpu [--daemon] [--interval N] [--file PATH]\n", argv[0]);
         return 1;
+    }
+
+    bool run_daemon = false;
+    int interval_sec = 1;
+    const char *file_path = NULL;
+
+    for (int i = 2; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--daemon") == 0)
+        {
+            run_daemon = true;
+        }
+        else if (strcmp(argv[i], "--file") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "--file needs a path.\n");
+                return 1;
+            }
+
+            file_path = argv[++i];
+        }
+        else if (strcmp(argv[i], "--interval") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "--interval needs a value in seconds.\n");
+                return 1;
+            }
+
+            interval_sec = atoi(argv[++i]);
+
+            if (interval_sec < 1)
+            {
+                fprintf(stderr, "--interval must be at least 1.\n");
+                return 1;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            return 1;
+        }
     }
 
     if (!strcmp(argv[1], "cpu"))
     {
-        print_cpu_info();
+        if (run_daemon)
+            daemon_loop(print_cpu_info, interval_sec, file_path);
+        else
+            print_cpu_info();
     }
     else if (!strcmp(argv[1], "gpu"))
     {
         int gpu_type = detect_gpu_type();
+        void (*printer)(void) = NULL;
 
         switch (gpu_type)
         {
         case GPU_TYPE_AMD:
-            print_amd_gpu_info();
+            printer = print_amd_gpu_info;
 
             break;
 #ifdef NVIDIA_GPU
         case GPU_TYPE_NVIDIA:
-            print_nvidia_gpu_info();
+            printer = print_nvidia_gpu_info;
 
             break;
 #endif
         default:
+            break;
+        }
+
+        if (printer == NULL)
+        {
             fprintf(stderr, "No compatible GPU found!\n");
             return 1;
         }
+
+        if (run_daemon)
+            daemon_loop(printer, interval_sec, file_path);
+        else
+            printer();
     }
 
     return 0;

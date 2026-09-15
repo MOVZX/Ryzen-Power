@@ -1,0 +1,12 @@
+[Unit]
+Description=Power usage monitor for GPU (latest line in /dev/shm/powerusage-gpu)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/powerusage gpu --daemon --interval 1 --file /dev/shm/powerusage-gpu
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
