@@ -209,6 +209,10 @@ static void get_cpu_freqs(int *out_max)
  * can run in turn, for example from a panel poller. Without the lock, two
  * writers can overwrite each other, so MAX can look like a decrease.
  *
+ * The systemd daemon creates the file as root. When a normal user cannot
+ * open the file for write, the tool opens it read-only. The user still
+ * reads the stored MAX, but cannot update the file.
+ *
  * @param out_cur Storage for the highest core frequency now (CUR) in MHz.
  * @param out_max Storage for the merged MAX value in MHz. This is history and can only rise.
  */
@@ -218,16 +222,27 @@ void update_cpu_freqs(int *out_cur, int *out_max)
 
     get_cpu_freqs(&cur_max);
 
-    /* O_NOFOLLOW: do not follow a symlink that another user planted in /tmp. */
+    /* O_NOFOLLOW: do not follow a symlink that another user planted in /tmp.
+     * The systemd daemon runs as root, so the file it creates is not
+     * writable for a normal user. Retry read-only. The read of the stored
+     * MAX still works, only the update is lost. */
     int lock_fd = open(CPU_STATS_PATH, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
+    bool can_write = true;
 
     if (lock_fd < 0)
     {
-        /* Cannot open the file: show only the sampling result. */
-        *out_cur = cur_max;
-        *out_max = cur_max;
+        lock_fd = open(CPU_STATS_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 
-        return;
+        if (lock_fd < 0)
+        {
+            /* Cannot open the file at all: show only the sampling result. */
+            *out_cur = cur_max;
+            *out_max = cur_max;
+
+            return;
+        }
+
+        can_write = false;
     }
 
     flock(lock_fd, LOCK_EX);
@@ -241,7 +256,7 @@ void update_cpu_freqs(int *out_cur, int *out_max)
     char line[64];
     char key[16];
     int value;
-    FILE *f = fdopen(lock_fd, "r+");
+    FILE *f = fdopen(lock_fd, can_write ? "r+" : "r");
 
     if (f)
     {
@@ -277,7 +292,7 @@ void update_cpu_freqs(int *out_cur, int *out_max)
      * lock, then truncate the leftover bytes of the old content. */
     int changed = (max_mhz != old_max) || (cur_mhz != old_cur);
 
-    if (changed && max_mhz >= 0 && f != NULL)
+    if (changed && can_write && max_mhz >= 0 && f != NULL)
     {
         fseek(f, 0, SEEK_SET);
 
@@ -777,23 +792,25 @@ void print_nvidia_gpu_info(void)
             if (nvidia_fd < 0)
                 break;
 
-            uint32_t vram_addr = (dev->base_addr[0] & 0xFFFFFFFF) + VRAM_REGISTER_OFFSET;
-            void *nvidia_map_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, nvidia_fd, vram_addr & ~(page_size - 1));
+            uint64_t vram_addr = (uint64_t)dev->base_addr[0] + VRAM_REGISTER_OFFSET;
+            void *nvidia_map_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, nvidia_fd,
+                                         (off_t)(vram_addr & ~(uint64_t)(page_size - 1)));
 
             if (nvidia_map_base != MAP_FAILED)
             {
-                uint32_t *vram_reg = (uint32_t *)((char *)nvidia_map_base + (vram_addr & (page_size - 1)));
+                uint32_t *vram_reg = (uint32_t *)((char *)nvidia_map_base + (vram_addr & (uint64_t)(page_size - 1)));
                 vram_temp = (*vram_reg & NVIDIA_VRAM_TEMP_MASK) / NVIDIA_VRAM_TEMP_DIVISOR;
 
                 munmap(nvidia_map_base, page_size);
             }
 
-            uint32_t hotspot_addr = (dev->base_addr[0] & 0xFFFFFFFF) + HOTSPOT_REGISTER_OFFSET;
-            void *hotspot_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, nvidia_fd, hotspot_addr & ~(page_size - 1));
+            uint64_t hotspot_addr = (uint64_t)dev->base_addr[0] + HOTSPOT_REGISTER_OFFSET;
+            void *hotspot_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, nvidia_fd,
+                                      (off_t)(hotspot_addr & ~(uint64_t)(page_size - 1)));
 
             if (hotspot_base != MAP_FAILED)
             {
-                uint32_t *hotspot_reg = (uint32_t *)((char *)hotspot_base + (hotspot_addr & (page_size - 1)));
+                uint32_t *hotspot_reg = (uint32_t *)((char *)hotspot_base + (hotspot_addr & (uint64_t)(page_size - 1)));
                 uint32_t temp_hotspot = (*hotspot_reg >> NVIDIA_HOTSPOT_TEMP_SHIFT) & NVIDIA_HOTSPOT_TEMP_MASK;
                 hotspot_temp = (temp_hotspot < NVIDIA_HOTSPOT_VALID_MAX) ? temp_hotspot : 0;
 

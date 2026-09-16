@@ -41,6 +41,36 @@ typedef struct
 } FreqStats;
 
 /**
+ * @brief Read the current frequency of one CPU core.
+ *
+ * The path is "cpu" in most cases, with a "platform-cpufreq" fallback for
+ * kernel 6.10 and newer.
+ *
+ * @param cpu Core number.
+ * @return int Frequency in MHz, or 0 when the core is offline or the read
+ *             fails.
+ */
+static int get_core_frequency(int cpu)
+{
+    char freq_path[PATH_MAX];
+    int freq_khz;
+
+    snprintf(freq_path, sizeof(freq_path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+
+    freq_khz = read_int_from_file(freq_path);
+
+    if (freq_khz <= 0)
+    {
+        snprintf(freq_path, sizeof(freq_path),
+                 "/sys/devices/system/cpu/platform-cpufreq/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+
+        freq_khz = read_int_from_file(freq_path);
+    }
+
+    return (freq_khz > 0) ? freq_khz / 1000 : 0;
+}
+
+/**
  * @brief Read the current frequency of every CPU core.
  *
  * @param freqs Array that stores the frequency of each core in MHz.
@@ -49,14 +79,7 @@ typedef struct
 static void get_cpu_frequencies(int *freqs, int cpu_count)
 {
     for (int i = 0; i < cpu_count; i++)
-    {
-        char freq_path[PATH_MAX];
-
-        snprintf(freq_path, sizeof(freq_path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i);
-
-        int freq_khz = read_int_from_file(freq_path);
-        freqs[i] = (freq_khz != -1) ? freq_khz / 1000 : 0;
-    }
+        freqs[i] = get_core_frequency(i);
 }
 
 /**

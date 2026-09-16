@@ -395,9 +395,9 @@ static void read_nvidia_vram_temp(const char *bus_id, int *vram_temp)
             if (pass == 0 && !nvidia_bus_id_matches(bus_id, dev))
                 continue;
 
-            uint32_t vram_addr = (dev->base_addr[0] & 0xFFFFFFFFu) + reg_offset;
-            uint32_t page_off = vram_addr & (uint32_t)(page_size - 1);
-            uint32_t page_base = vram_addr - page_off;
+            uint64_t vram_addr = (uint64_t)dev->base_addr[0] + reg_offset;
+            uint32_t page_off = (uint32_t)(vram_addr & (uint64_t)(page_size - 1));
+            uint64_t page_base = vram_addr - page_off;
 
             void *vram_base = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd, (off_t)page_base);
 

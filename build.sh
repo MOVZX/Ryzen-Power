@@ -85,21 +85,56 @@ build()
         -o "$target" "$target.c" "$@" -lm
 }
 
-# libpci is used only by sens and powerusage, which read GPU registers
-# through /dev/mem.
+# libpci and NVML are needed only for NVIDIA support. The tools read GPU
+# registers through /dev/mem only with -DNVIDIA_GPU. NVIDIA_LIBS is empty
+# for a CPU-only build, so a CPU-only build needs nothing beyond the
+# compiler.
 build ryzen
 build cpuf
-build sens -lpci "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
-build powerusage -lpci "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
+build sens "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
+build powerusage "${NVIDIA_LIBS[@]+"${NVIDIA_LIBS[@]}"}"
 
 echo -e "\e[32m✔ Build completed.\e[0m"
 
 case "${1:-}" in
     install)
-        install -d "$PREFIX/bin"
-        install -m 0755 ryzen cpuf powerusage sens "$PREFIX/bin/"
+        # The usual PREFIX is /usr/local, which needs root. A non-root run
+        # with sudo available uses sudo automatically. Without sudo, the
+        # install commands run as the current user and fail with a clear
+        # message when the target is not writable.
+        SUDO=""
+
+        if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+        fi
+
+        $SUDO install -d "$PREFIX/bin"
+        $SUDO install -m 0755 ryzen cpuf powerusage sens "$PREFIX/bin/"
 
         echo -e "\e[32m✔ Installed to $PREFIX/bin\e[0m"
+
+        # The systemd units start powerusage as a daemon. Install them into
+        # /etc/systemd/system only when systemd exists and we may write there.
+        # The ExecStart line names /usr/local/bin; rewrite it to $PREFIX/bin
+        # for a custom PREFIX.
+        if command -v systemctl >/dev/null 2>&1; then
+            if [ -n "$SUDO" ] || [ -w /etc/systemd/system ]; then
+                $SUDO install -m 0644 powerusage-cpu.service powerusage-gpu.service /etc/systemd/system/
+                $SUDO sed -i "s|/usr/local/bin|$PREFIX/bin|" /etc/systemd/system/powerusage-cpu.service /etc/systemd/system/powerusage-gpu.service
+                $SUDO systemctl daemon-reload
+
+                # A running unit keeps the old binary in memory, so it needs
+                # a restart to pick up the new one. On a stopped unit, restart
+                # starts it. enable only records the boot symlink here,
+                # because "enable --now" would not restart a running unit.
+                $SUDO systemctl enable powerusage-cpu powerusage-gpu
+                $SUDO systemctl restart powerusage-cpu powerusage-gpu
+
+                echo -e "\e[32m✔ Enabled, started, and updated the powerusage services.\e[0m"
+            else
+                echo -e "\e[33mℹ /etc/systemd/system is not writable. Skip the systemd units.\e[0m"
+            fi
+        fi
         ;;
     "")
         ;;

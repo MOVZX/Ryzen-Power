@@ -63,15 +63,21 @@ so you must rebuild to change it.
 
 ## Install
 
-The binaries run from the current directory. To install them on the PATH, run this
-command as root:
+The binaries run from the current directory. To install them on the PATH, run:
 
 ```bash
-sudo ./build.sh install
+./build.sh install
 ```
+
+A non-root run uses `sudo` for the install steps.
 
 The command copies all four tools to `$PREFIX/bin`. Set `PREFIX` to install somewhere
 else. Example: `PREFIX="$HOME/.local" ./build.sh install`.
+
+The command also installs `powerusage-cpu.service` and `powerusage-gpu.service` into
+`/etc/systemd/system`. It rewrites the tool path inside the units, so a custom
+`PREFIX` works. The command then enables the units for the next boot and starts or
+restarts the running services. No further step is needed.
 
 Reinstall after every rebuild. If you do not reinstall, you keep testing the old copy.
 
@@ -130,6 +136,25 @@ Your kernel must allow `/dev/mem` reads of device memory. If the read returns no
 add `iomem=relaxed` to the kernel command line. The memory and hotspot temperature then
 show as 0.
 
+Daemon mode repeats the print once per interval:
+
+```bash
+powerusage cpu --daemon --interval 2
+```
+
+`--file PATH` sends the line to a file instead of standard output. The tool writes a
+temp file first, then renames it over the target. A reader therefore always sees one
+complete line:
+
+```bash
+powerusage cpu --daemon --interval 1 --file /dev/shm/powerusage-cpu
+```
+
+The repo ships two systemd units: `powerusage-cpu.service` and
+`powerusage-gpu.service`. They run this mode and write the latest line to
+`/dev/shm/powerusage-cpu` and `/dev/shm/powerusage-gpu`. A panel reads that file.
+`./build.sh install` installs the units for you. See [Install](#install).
+
 ### `sens`
 
 ```bash
@@ -182,12 +207,15 @@ Power    : 57.60 W
   also works on AMD. Your user must be able to read that file. New kernels wrap the
   counter at `max_energy_range_uj`, so the tools correct for the wrap. If your user
   cannot read `energy_uj`, a kernel patch can make the file world-readable.
-- **`/tmp/cpu_stats.txt`.** `powerusage cpu` stores the `AVG`, `MAX` and `CUR` frequency
-  in that file. `MAX` can only rise, so the peak survives between runs. Delete the file
-  to reset the peak. Panel pollers and manual runs share the file, so the tool locks it
-  with `flock()`. The tool also opens it with `O_NOFOLLOW`, so a symlink in `/tmp` cannot
-  redirect the write. If the tool cannot open the file, it still prints one line and
-  shows the current sample instead of the stored peak.
+- **`/tmp/cpu_stats.txt`.** `powerusage cpu` stores the `MAX` and `CUR` frequency
+  in that file. `MAX` can only rise, so the peak survives between runs. Delete the
+  file to reset the peak. Panel pollers and manual runs share the file, so the tool
+  locks it with `flock()`. The tool also opens it with `O_NOFOLLOW`, so a symlink in
+  `/tmp` cannot redirect the write. The daemon service runs as root, so the file
+  belongs to root. A normal user then opens the file read-only. The user still sees
+  the stored peak, but only the daemon updates the file. If the tool cannot open the
+  file at all, it still prints one line and shows the current sample instead of the
+  stored peak.
 - **Debug output.** `powerusage` says nothing when a sensor read fails. A panel then
   prints such a message as its own line. Set `RYZEN_POWER_DEBUG=1` to send those messages
   to stderr.
